@@ -41,7 +41,7 @@ models:
   video:
     hf_name: MCG-NJU/videomae-base
     # ModelScope model ID (used only if local_path is null)
-    ms_name: iic/videomae-base
+    ms_name: OpenGVLab/VideoMAE2
     # Local pre-downloaded path — 如果已下载请填写，设为 null 则自动从 ModelScope 下载
     local_path: null
     frame_count: 16
