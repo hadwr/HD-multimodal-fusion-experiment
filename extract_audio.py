@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 from utils import (
     load_config,
-    download_model_from_modelscope,
+    resolve_model_path,
     extract_subject_id,
     save_embedding,
 )
@@ -95,6 +95,8 @@ def main():
     parser = argparse.ArgumentParser(description="Extract wav2vec2 audio embeddings")
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument("--device", default=None, help="Override device (cuda/cpu)")
+    parser.add_argument("--model-path", default=None,
+                        help="Pre-downloaded model directory (overrides config)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -104,7 +106,8 @@ def main():
     output_dir = Path(cfg["paths"]["output_dir"])
     emb_out = output_dir / "emb" / "audio"
 
-    # ---- download model via ModelScope ----
+    # ---- resolve model path (local > ModelScope) ----
+    model_local = args.model_path or cfg["models"]["audio"].get("local_path")
     ms_name = cfg["models"]["audio"]["ms_name"]
     target_sr = cfg["models"]["audio"]["sample_rate"]
 
@@ -119,7 +122,7 @@ def main():
         print("[HINT] Are you running on the server with the data mounted?")
         sys.exit(1)
 
-    local_path = download_model_from_modelscope(ms_name)
+    local_path = resolve_model_path(model_local, ms_name)
     model, processor = load_wav2vec2_local(local_path, device=device)
 
     # ---- iterate over .wav files ----

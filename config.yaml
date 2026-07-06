@@ -29,13 +29,19 @@ models:
   audio:
     # HuggingFace ID (for reference)
     hf_name: facebook/wav2vec2-base
-    # ModelScope model ID
-    ms_name: iic/wav2vec2-base
+    # ModelScope model ID (used only if local_path is null)
+    ms_name: TencentGameMate/chinese-wav2vec2-base
+    # Local pre-downloaded path — if set, skip ModelScope download
+    local_path: /public/labdata/huangda/HD/models/modelscope/models/TencentGameMate/chinese-wav2vec2-base
     sample_rate: 16000
 
   video:
     hf_name: MCG-NJU/videomae-base
+    # ModelScope model ID (used only if local_path is null)
+    # 注意：需要确认 ModelScope 上的正确 ID，可能需要先手动下载
     ms_name: iic/videomae-base
+    # Local pre-downloaded path — 如果已下载请填写，设为 null 则自动从 ModelScope 下载
+    local_path: null
     frame_count: 16
     img_size: 224
     fps: null            # null = use native video fps for uniform sampling

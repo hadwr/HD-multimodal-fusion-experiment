@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from utils import (
     load_config,
-    download_model_from_modelscope,
+    resolve_model_path,
     extract_subject_id,
     save_embedding,
 )
@@ -151,6 +151,8 @@ def main():
     parser.add_argument("--device", default=None, help="Override device (cuda/cpu)")
     parser.add_argument("--pool", default="cls", choices=["cls", "mean"],
                         help="Pooling mode: cls token or mean over patches")
+    parser.add_argument("--model-path", default=None,
+                        help="Pre-downloaded model directory (overrides config)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -160,7 +162,8 @@ def main():
     output_dir = Path(cfg["paths"]["output_dir"])
     emb_out = output_dir / "emb" / "video"
 
-    # ---- download model via ModelScope ----
+    # ---- resolve model path (local > ModelScope) ----
+    model_local = args.model_path or cfg["models"]["video"].get("local_path")
     ms_name = cfg["models"]["video"]["ms_name"]
     num_frames = cfg["models"]["video"]["frame_count"]
     img_size = cfg["models"]["video"]["img_size"]
@@ -178,7 +181,7 @@ def main():
         print("[HINT] Are you running on the server with the data mounted?")
         sys.exit(1)
 
-    local_path = download_model_from_modelscope(ms_name)
+    local_path = resolve_model_path(model_local, ms_name)
     model, processor = load_videomae_local(local_path, device=device)
 
     # ---- iterate over HDXXX/ subdirs ----

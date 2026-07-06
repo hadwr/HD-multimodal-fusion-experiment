@@ -44,6 +44,31 @@ def load_config(config_path: str = "config.yaml") -> dict:
 # ModelScope → transformers bridge
 # ============================================================
 
+def resolve_model_path(local_path: Optional[str], ms_model_id: str, cache_dir: Optional[str] = None) -> str:
+    """
+    Resolve model path: use ``local_path`` if provided, otherwise download from ModelScope.
+
+    Parameters
+    ----------
+    local_path : str or None
+        Pre-downloaded model directory. If set, returned as-is.
+    ms_model_id : str
+        ModelScope model ID, used only if local_path is None.
+    cache_dir : str, optional
+
+    Returns
+    -------
+    str
+        Absolute path to the model directory.
+    """
+    if local_path and Path(local_path).is_dir():
+        print(f"[Model] Using local path: {local_path}")
+        return local_path
+    if local_path:
+        print(f"[Model] Local path not found: {local_path}, falling back to ModelScope.")
+    return download_model_from_modelscope(ms_model_id, cache_dir=cache_dir)
+
+
 def download_model_from_modelscope(ms_model_id: str, cache_dir: Optional[str] = None) -> str:
     """
     Download a model from ModelScope and return the local path
