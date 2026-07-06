@@ -122,7 +122,7 @@ def main():
         print("[HINT] Are you running on the server with the data mounted?")
         sys.exit(1)
 
-    local_path = resolve_model_path(model_local, ms_name)
+    local_path = resolve_model_path(model_local, ms_name, cache_dir=cfg["models"].get("cache_dir"))
     model, processor = load_wav2vec2_local(local_path, device=device)
 
     # ---- iterate over .wav files ----
