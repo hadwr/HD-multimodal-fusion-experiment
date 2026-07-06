@@ -1,0 +1,76 @@
+# ============================================================
+# HD Multimodal Fusion Experiment — Configuration
+# ============================================================
+
+paths:
+  # Audio: /public/labdata/.../HDacoustic/HDXXX.wav
+  audio_dir: /public/labdata/huangda/HD/Data/dataset/HD_final/HDacoustic
+
+  # Video: /NAS/.../preprocessed_audio/HDXXX/4.mp4
+  video_dir: /NAS/public2_data/huangda/preprocessed_audio
+
+  # MemTrax xlsx (one row per subject, columns = metrics)
+  memtrax_xlsx: null  # TODO: fill in the actual path
+
+  # Label xlsx: columns "sample_id" (HDXXX), "stages" (pre/1/2)
+  label_xlsx: /public/labdata/huangda/HD/Data/dataset/20250610.xlsx
+
+  # Output root
+  output_dir: ./output
+
+  # HC (healthy control) data — separate folder, no scales
+  hc_audio_dir: null  # TODO: fill in if available
+  hc_video_dir: null  # TODO: fill in if available
+
+# ------------------------------------------------------------
+# Model configuration (via ModelScope → transformers)
+# ------------------------------------------------------------
+models:
+  audio:
+    # HuggingFace ID (for reference)
+    hf_name: facebook/wav2vec2-base
+    # ModelScope model ID
+    ms_name: iic/wav2vec2-base
+    sample_rate: 16000
+
+  video:
+    hf_name: MCG-NJU/videomae-base
+    ms_name: iic/videomae-base
+    frame_count: 16
+    img_size: 224
+    fps: null            # null = use native video fps for uniform sampling
+
+# ------------------------------------------------------------
+# Visualization
+# ------------------------------------------------------------
+visualization:
+  method: umap           # "umap" | "tsne" | "both"
+  perplexity: 30         # t-SNE only
+  n_neighbors: 15        # UMAP only
+  random_state: 42
+
+# ------------------------------------------------------------
+# Fusion / classification
+# ------------------------------------------------------------
+fusion:
+  methods: [concat]      # "concat" first; "attention" later
+  test_size: 0.2
+  val_size: 0.1          # from training set
+  random_state: 42
+  # Classification target: pre vs (1,2) — binary
+  labels:
+    positive: [1, 2]
+    negative: [pre]
+  # MLP hidden dims
+  hidden_dims: [256, 128]
+  dropout: 0.3
+  batch_size: 32
+  epochs: 100
+  early_stopping_patience: 15
+  lr: 0.001
+
+# ------------------------------------------------------------
+# Runtime
+# ------------------------------------------------------------
+device: cuda             # "cuda" | "cpu"
+num_workers: 4
