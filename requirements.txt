@@ -13,7 +13,6 @@ soundfile>=0.12.0
 
 # Video
 opencv-python>=4.8.0
-av>=10.0.0
 
 # Transformers & ModelScope
 transformers>=4.35.0

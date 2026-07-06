@@ -46,35 +46,27 @@ def sample_frames_from_video(
     img_size: int = 224,
 ) -> np.ndarray:
     """
-    Uniformly sample ``num_frames`` frames from a video using PyAV (``av``).
+    Uniformly sample ``num_frames`` frames from a video using OpenCV.
 
     Returns
     -------
     frames : np.ndarray  shape (num_frames, H, W, C), dtype uint8, RGB
     """
-    import av
+    import cv2
 
-    container = av.open(video_path)
-    stream = container.streams.video[0]
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
 
-    # Total frames in the video
-    total_frames = stream.frames
-    if total_frames == 0:
-        # Fallback: decode and count
-        total_frames = 0
-        for frame in container.decode(stream):
-            total_frames += 1
-        container.close()
-        container = av.open(video_path)
-        stream = container.streams.video[0]
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if total_frames <= 0:
+        cap.release()
         raise ValueError(f"No video frames found in {video_path}")
 
     # Uniform indices
     if total_frames <= num_frames:
         indices = list(range(total_frames))
-        # pad by repeating last frame if we have fewer
         while len(indices) < num_frames:
             indices.append(indices[-1])
     else:
@@ -82,23 +74,22 @@ def sample_frames_from_video(
         indices = [int(i * step) for i in range(num_frames)]
 
     frames = []
-    frame_idx = 0
-    target_idx = 0
-
-    for frame in container.decode(stream):
-        if target_idx >= len(indices):
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if not ret:
             break
-        if frame_idx == indices[target_idx]:
-            img = frame.to_ndarray(format="rgb24")  # (H, W, 3)
-            frames.append(img)
-            target_idx += 1
-        frame_idx += 1
+        # BGR → RGB
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if frame.shape[0] != img_size or frame.shape[1] != img_size:
+            frame = cv2.resize(frame, (img_size, img_size))
+        frames.append(frame)
 
-    container.close()
+    cap.release()
 
-    # Pad if we still don't have enough
+    # Pad if we couldn't read enough frames
     while len(frames) < num_frames:
-        frames.append(frames[-1])
+        frames.append(frames[-1] if frames else np.zeros((img_size, img_size, 3), dtype=np.uint8))
 
     frames = np.stack(frames, axis=0)  # (T, H, W, 3)
     return frames
