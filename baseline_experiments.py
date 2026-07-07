@@ -25,6 +25,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -123,8 +126,9 @@ def load_data(cfg: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]
 def make_classifier(name: str, random_state: int = 42):
     """Create a classifier by name."""
     if name == "svm":
-        return SVC(kernel="rbf", C=1.0, gamma="scale", probability=True,
-                   random_state=random_state)
+        from sklearn.calibration import CalibratedClassifierCV
+        base = SVC(kernel="rbf", C=1.0, gamma="scale", random_state=random_state)
+        return CalibratedClassifierCV(base, ensemble=False)
     elif name == "logistic":
         return LogisticRegression(max_iter=2000, random_state=random_state)
     elif name == "random_forest":
@@ -232,7 +236,7 @@ def run_single_modality(
         metrics_pca.update({
             "modality": modality_name,
             "classifier": clf_name,
-            "features": f"pca{dim}",
+            "features": f"pca{pca_dim}",
             "dim": pca_dim,
         })
         cv_pca = cv_evaluate(clf_pca, np.vstack([X_train_pca, X_test_pca]),
