@@ -86,7 +86,7 @@ baseline:
   random_state: 42
   pca_variance: 0.95
   classifiers: [svm, logistic, random_forest]
-  fusion_methods: [concat, mean_prob, voting]
+  fusion_methods: [concat, mean_prob, voting, cca]
 
 # ------------------------------------------------------------
 # Runtime

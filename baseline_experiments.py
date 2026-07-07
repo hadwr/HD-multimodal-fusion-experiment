@@ -46,6 +46,7 @@ from sklearn.metrics import (
     precision_recall_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
+from sklearn.cross_decomposition import CCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
@@ -352,6 +353,111 @@ def run_late_fusion(
     return results
 
 
+def run_cca_fusion(
+    X_audio: np.ndarray,
+    X_video: np.ndarray,
+    y: np.ndarray,
+    cfg: dict,
+) -> List[dict]:
+    """
+    CCA fusion: PCA-reduce each modality, then CCA to find maximally
+    correlated projections. Fuse via concatenation of CCA components,
+    then classify.
+    """
+    print("\n=== CCA Fusion ===")
+
+    results = []
+    test_size = cfg["baseline"]["test_size"]
+    pca_var = cfg["baseline"]["pca_variance"]
+    cv_folds = cfg["baseline"]["cv_folds"]
+    rs = cfg["baseline"]["random_state"]
+
+    # Stratified split
+    _, X_a_test, _, X_v_test, _, y_test, X_a_train, X_v_train, y_train = _split(
+        X_audio, X_video, y, test_size, rs
+    )
+    scaler_a, scaler_v = StandardScaler(), StandardScaler()
+    X_a_train = scaler_a.fit_transform(X_a_train)
+    X_a_test = scaler_a.transform(X_a_test)
+    X_v_train = scaler_v.fit_transform(X_v_train)
+    X_v_test = scaler_v.transform(X_v_test)
+
+    # PCA first (reduce to manageable dim)
+    pca_a = PCA(n_components=pca_var, random_state=rs)
+    pca_v = PCA(n_components=pca_var, random_state=rs)
+    X_a_train_pca = pca_a.fit_transform(X_a_train)
+    X_a_test_pca = pca_a.transform(X_a_test)
+    X_v_train_pca = pca_v.fit_transform(X_v_train)
+    X_v_test_pca = pca_v.transform(X_v_test)
+
+    # CCA — find correlated subspace
+    n_cca = min(X_a_train_pca.shape[1], X_v_train_pca.shape[1], len(y_train) - 1)
+    cca = CCA(n_components=n_cca, scale=False, max_iter=2000)
+    cca.fit(X_a_train_pca, X_v_train_pca)
+
+    # Transform
+    a_train_cca, v_train_cca = cca.transform(X_a_train_pca, X_v_train_pca)
+    a_test_cca, v_test_cca = cca.transform(X_a_test_pca, X_v_test_pca)
+
+    # Canonical correlations (on training data)
+    can_corrs = np.array([np.corrcoef(a_train_cca[:, i], v_train_cca[:, i])[0, 1]
+                          for i in range(n_cca)])
+    top5_corr = ", ".join(f"{c:.3f}" for c in sorted(can_corrs, reverse=True)[:5])
+    print(f"  PCA dims: audio={X_a_train_pca.shape[1]}, video={X_v_train_pca.shape[1]}")
+    print(f"  CCA components: {n_cca}")
+    print(f"  Top-5 canonical correlations: {top5_corr}")
+    print(f"  Mean canonical corr: {can_corrs.mean():.4f}")
+
+    # Fuse: concatenate CCA projections
+    X_train_fused = np.concatenate([a_train_cca, v_train_cca], axis=1)
+    X_test_fused = np.concatenate([a_test_cca, v_test_cca], axis=1)
+    fused_dim = X_train_fused.shape[1]
+
+    X_full = np.concatenate([
+        np.concatenate([cca.transform(X_a_train_pca, X_v_train_pca)[0],
+                        cca.transform(X_a_train_pca, X_v_train_pca)[1]], axis=1),
+        np.concatenate([a_test_cca, v_test_cca], axis=1),
+    ], axis=0)
+    y_full = np.concatenate([y_train, y_test])
+
+    for clf_name, clf in make_classifiers(cfg):
+        clf.fit(X_train_fused, y_train)
+        y_pred = clf.predict(X_test_fused)
+        try:
+            y_prob = clf.predict_proba(X_test_fused)
+        except Exception:
+            y_prob = None
+        metrics = evaluate(y_test, y_pred, y_prob)
+        metrics.update({
+            "modality": "audio+video (CCA)",
+            "classifier": clf_name,
+            "features": f"cca{fused_dim}",
+            "dim": fused_dim,
+            "canonical_corr_mean": can_corrs.mean(),
+        })
+        cv_m = cv_evaluate(clf, X_full, y_full, cv_folds)
+        metrics["cv_auc_roc"] = cv_m["auc_roc"]
+        metrics["cv_pr_auc"] = cv_m["pr_auc"]
+        results.append(metrics)
+        print(f"  {clf_name:>16s}  CCA   | AUC={metrics['auc_roc']:.4f}  PR={metrics['pr_auc']:.4f}  CV_AUC={metrics['cv_auc_roc']:.4f}")
+
+    # Also store canonical correlations for plotting
+    results.append({
+        "modality": "audio+video (CCA)",
+        "classifier": "_cca_stats",
+        "features": f"cca{n_cca}",
+        "dim": n_cca,
+        "auc_roc": can_corrs.mean(),  # hack: store mean corr in auc_roc slot for bar chart
+        "pr_auc": 0,
+        "accuracy": 0,
+        "cv_auc_roc": 0,
+        "cv_pr_auc": 0,
+        "canonical_corr_mean": can_corrs.mean(),
+    })
+
+    return results
+
+
 def _split(X_a, X_v, y, test_size, rs):
     """Stratified train/test split that preserves alignment."""
     n = len(y)
@@ -380,8 +486,8 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
     test_size = cfg["baseline"]["test_size"]
 
     # --- Bar chart: AUC-ROC by method ---
-    fig, ax = plt.subplots(figsize=(14, 6))
-    df_plot = df.copy()
+    fig, ax = plt.subplots(figsize=(14, 7))
+    df_plot = df[df["classifier"] != "_cca_stats"].copy()
     df_plot["label"] = df_plot["modality"] + " | " + df_plot["classifier"] + " | " + df_plot["features"]
     df_plot = df_plot.sort_values("auc_roc", ascending=True)
 
@@ -389,6 +495,8 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
     for _, row in df_plot.iterrows():
         if "late" in str(row["features"]):
             colors.append("#e74c3c")
+        elif "CCA" in str(row["modality"]):
+            colors.append("#9b59b6")
         elif "early" in str(row["modality"]) or "audio+video" in str(row["modality"]):
             colors.append("#3498db")
         elif "audio" in str(row["modality"]):
@@ -409,6 +517,7 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
         Patch(facecolor="#f39c12", label="Video only"),
         Patch(facecolor="#3498db", label="Early Fusion (Concat)"),
         Patch(facecolor="#e74c3c", label="Late Fusion"),
+        Patch(facecolor="#9b59b6", label="CCA Fusion"),
     ]
     ax.legend(handles=legend_elements, loc="lower right", fontsize=8)
     fig.tight_layout()
@@ -482,14 +591,20 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
     plt.close(fig)
     print(f"  Saved: {output_dir / 'roc_pr_curves.png'}")
 
+    # --- CCA canonical correlation ---
+    cca_info = df[df["classifier"] == "_cca_stats"]
+    if len(cca_info) > 0:
+        mean_corr = cca_info.iloc[0]["canonical_corr_mean"]
+        print(f"  CCA mean canonical correlation: {mean_corr:.4f}")
+
 
 def plot_confusion_matrices(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: Path):
     """Generate confusion matrices for top-3 *non-late* methods."""
     from sklearn.model_selection import train_test_split as tts
 
     df = pd.DataFrame(all_results)
-    # Skip late fusion — they aren't single classifier models
-    df_trainable = df[df["features"] != "late"]
+    # Skip late fusion and CCA — they aren't simple classifier models
+    df_trainable = df[(df["features"] != "late") & (~df["features"].str.startswith("cca"))]
     top_n = min(3, len(df_trainable))
     if top_n == 0:
         print("  [Warn] No trainable methods for confusion matrices.")
@@ -554,11 +669,19 @@ def plot_confusion_matrices(all_results: List[dict], X_audio, X_video, y, cfg, o
 def write_report(all_results: List[dict], output_dir: Path):
     """Write a brief text report."""
     df = pd.DataFrame(all_results)
+    # Exclude metadata marker rows
+    df_report = df[df["classifier"] != "_cca_stats"].copy()
     report_path = output_dir / "report.txt"
 
-    best = df.loc[df["auc_roc"].idxmax()]
-    audio_best = df[df["modality"] == "audio"].loc[df[df["modality"] == "audio"]["auc_roc"].idxmax()]
-    video_best = df[df["modality"] == "video"].loc[df[df["modality"] == "video"]["auc_roc"].idxmax()]
+    best = df_report.loc[df_report["auc_roc"].idxmax()]
+    audio_best = df_report[df_report["modality"] == "audio"].loc[
+        df_report[df_report["modality"] == "audio"]["auc_roc"].idxmax()]
+    video_best = df_report[df_report["modality"] == "video"].loc[
+        df_report[df_report["modality"] == "video"]["auc_roc"].idxmax()]
+
+    # CCA stats
+    cca_info = df[df["classifier"] == "_cca_stats"]
+    cca_corr = cca_info.iloc[0]["canonical_corr_mean"] if len(cca_info) > 0 else None
 
     lines = [
         "=" * 60,
@@ -566,7 +689,13 @@ def write_report(all_results: List[dict], output_dir: Path):
         "=" * 60,
         "",
         f"  Task: pre vs stage (1,2,3,4) binary classification",
-        f"  Total methods evaluated: {len(df)}",
+        f"  Total methods evaluated: {len(df_report)}",
+    ]
+
+    if cca_corr is not None:
+        lines.append(f"  CCA mean canonical correlation: {cca_corr:.4f}")
+
+    lines += [
         "",
         "-" * 40,
         "  Best overall (by AUC-ROC)",
@@ -597,7 +726,7 @@ def write_report(all_results: List[dict], output_dir: Path):
     ]
 
     cols = ["modality", "classifier", "features", "auc_roc", "pr_auc", "cv_auc_roc", "cv_pr_auc"]
-    tbl = df[cols].sort_values("auc_roc", ascending=False)
+    tbl = df_report[cols].sort_values("auc_roc", ascending=False)
     lines.append(tbl.to_string(index=False))
     lines.append("")
     lines.append("=" * 60)
@@ -649,6 +778,9 @@ def main():
 
     # ---- Late fusion ----
     all_results.extend(run_late_fusion(X_audio, X_video, y, cfg))
+
+    # ---- CCA fusion ----
+    all_results.extend(run_cca_fusion(X_audio, X_video, y, cfg))
 
     # ---- Plots & report ----
     print("\n--- Generating Plots & Report ---")
