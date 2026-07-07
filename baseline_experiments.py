@@ -526,7 +526,7 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
     print(f"  Saved: {output_dir / 'comparison_bar.png'}")
 
     # --- ROC + PR curves for top-6 *non-late* methods ---
-    top6 = df[df["features"] != "late"].nlargest(6, "auc_roc")
+    top6 = df[(df["features"] != "late") & (df["classifier"] != "_cca_stats")].nlargest(6, "auc_roc")
     fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
 
     for ax, curve_name, curve_fn, baseline_val in [
