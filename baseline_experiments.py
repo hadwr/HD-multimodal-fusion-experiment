@@ -228,7 +228,7 @@ def run_single_modality(
             y_prob_pca = clf_pca.predict_proba(X_test_pca)
         except Exception:
             y_prob_pca = None
-        metrics_pca = evaluate(y_test_pca, y_pred_pca, y_prob_pca)
+        metrics_pca = evaluate(y_test, y_pred_pca, y_prob_pca)
         metrics_pca.update({
             "modality": modality_name,
             "classifier": clf_name,
