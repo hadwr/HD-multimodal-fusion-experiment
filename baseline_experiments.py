@@ -416,8 +416,8 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
     plt.close(fig)
     print(f"  Saved: {output_dir / 'comparison_bar.png'}")
 
-    # --- ROC + PR curves for top-6 methods ---
-    top6 = df.nlargest(6, "auc_roc")
+    # --- ROC + PR curves for top-6 *non-late* methods ---
+    top6 = df[df["features"] != "late"].nlargest(6, "auc_roc")
     fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
 
     for ax, curve_name, curve_fn, baseline_val in [
@@ -484,28 +484,33 @@ def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: 
 
 
 def plot_confusion_matrices(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: Path):
-    """Generate confusion matrices for top-3 methods."""
+    """Generate confusion matrices for top-3 *non-late* methods."""
     from sklearn.model_selection import train_test_split as tts
 
     df = pd.DataFrame(all_results)
-    top3 = df.nlargest(3, "auc_roc")
+    # Skip late fusion — they aren't single classifier models
+    df_trainable = df[df["features"] != "late"]
+    top_n = min(3, len(df_trainable))
+    if top_n == 0:
+        print("  [Warn] No trainable methods for confusion matrices.")
+        return
+    top = df_trainable.nlargest(top_n, "auc_roc")
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig, axes = plt.subplots(1, top_n, figsize=(5 * top_n, 4.5))
+    if top_n == 1:
+        axes = [axes]
     rs = cfg["baseline"]["random_state"]
     test_size = cfg["baseline"]["test_size"]
 
-    for ax, (_, row) in zip(axes, top3.iterrows()):
+    for ax, (_, row) in zip(axes, top.iterrows()):
         mod = row["modality"]
         clf_name = row["classifier"]
         feat = row["features"]
 
         # Build X
-        if "audio+video" in mod and "late" not in str(feat):
-            if "early" in mod:
-                X = np.concatenate([X_audio, X_video], axis=1)
-            else:
-                X = np.concatenate([X_audio, X_video], axis=1)
-        elif "audio" in mod:
+        if "audio+video" in str(mod):
+            X = np.concatenate([X_audio, X_video], axis=1)
+        elif "audio" in str(mod):
             X = X_audio
         else:
             X = X_video
