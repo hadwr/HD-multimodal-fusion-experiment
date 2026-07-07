@@ -33,14 +33,18 @@ from utils import (
 
 
 def load_wav2vec2_local(local_path: str, device: str = "cuda"):
-    """Load wav2vec2 from a local ModelScope-downloaded directory."""
-    from transformers import Wav2Vec2Model, Wav2Vec2Processor
+    """Load wav2vec2 from a local ModelScope-downloaded directory.
 
-    processor = Wav2Vec2Processor.from_pretrained(local_path)
+    Uses Wav2Vec2FeatureExtractor (not Processor) because the Chinese model
+    lacks tokenizer files (converted from fairseq, no vocab.json).
+    """
+    from transformers import Wav2Vec2Model, Wav2Vec2FeatureExtractor
+
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(local_path)
     model = Wav2Vec2Model.from_pretrained(local_path)
     model = model.to(device)
     model.eval()
-    return model, processor
+    return model, feature_extractor
 
 
 @torch.no_grad()
@@ -59,7 +63,7 @@ def extract_audio_embedding(
     audio_path : str
         Path to a .wav file.
     model : Wav2Vec2Model
-    processor : Wav2Vec2Processor
+    feature_extractor : Wav2Vec2FeatureExtractor
     device : str
     target_sr : int
         Target sample rate (wav2vec2 expects 16 kHz).
