@@ -39,11 +39,11 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
+    roc_auc_score,
+    average_precision_score,
+    roc_curve,
+    precision_recall_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -149,18 +149,28 @@ def make_classifiers(config: dict) -> List[Tuple[str, object]]:
 # ============================================================
 
 def evaluate(y_true: np.ndarray, y_pred: np.ndarray, y_prob: Optional[np.ndarray] = None) -> dict:
-    """Compute all metrics."""
-    return {
+    """Compute metrics. Primary: AUC-ROC and PR-AUC (require y_prob)."""
+    metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
-        "f1_macro": f1_score(y_true, y_pred, average="macro"),
-        "f1_weighted": f1_score(y_true, y_pred, average="weighted"),
-        "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
-        "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
     }
+    if y_prob is not None and y_prob.ndim == 2 and y_prob.shape[1] >= 2:
+        pos_prob = y_prob[:, 1]
+        try:
+            metrics["auc_roc"] = roc_auc_score(y_true, pos_prob)
+        except ValueError:
+            metrics["auc_roc"] = float("nan")
+        try:
+            metrics["pr_auc"] = average_precision_score(y_true, pos_prob)
+        except ValueError:
+            metrics["pr_auc"] = float("nan")
+    else:
+        metrics["auc_roc"] = float("nan")
+        metrics["pr_auc"] = float("nan")
+    return metrics
 
 
 def cv_evaluate(clf, X: np.ndarray, y: np.ndarray, cv_folds: int = 5) -> dict:
-    """Stratified K-fold cross-validation evaluation."""
+    """Stratified K-fold CV evaluation using AUC-ROC and PR-AUC."""
     cv = StratifiedKFold(n_splits=min(cv_folds, min(np.bincount(y))), shuffle=True,
                          random_state=42)
     y_pred = cross_val_predict(clf, X, y, cv=cv, method="predict")
@@ -219,10 +229,10 @@ def run_single_modality(
         })
         # CV
         cv_m = cv_evaluate(clf, X, y, cv_folds)
-        metrics["cv_accuracy"] = cv_m["accuracy"]
-        metrics["cv_f1_weighted"] = cv_m["f1_weighted"]
+        metrics["cv_auc_roc"] = cv_m["auc_roc"]
+        metrics["cv_pr_auc"] = cv_m["pr_auc"]
         results.append(metrics)
-        print(f"  {clf_name:>16s}  raw   | acc={metrics['accuracy']:.4f}  f1={metrics['f1_weighted']:.4f}  cv_acc={metrics['cv_accuracy']:.4f}")
+        print(f"  {clf_name:>16s}  raw   | AUC={metrics['auc_roc']:.4f}  PR={metrics['pr_auc']:.4f}  CV_AUC={metrics['cv_auc_roc']:.4f}")
 
         # PCA
         clf_pca = make_classifier(clf_name, rs)
@@ -241,10 +251,10 @@ def run_single_modality(
         })
         cv_pca = cv_evaluate(clf_pca, np.vstack([X_train_pca, X_test_pca]),
                              np.hstack([y_train, y_test]), cv_folds)
-        metrics_pca["cv_accuracy"] = cv_pca["accuracy"]
-        metrics_pca["cv_f1_weighted"] = cv_pca["f1_weighted"]
+        metrics_pca["cv_auc_roc"] = cv_pca["auc_roc"]
+        metrics_pca["cv_pr_auc"] = cv_pca["pr_auc"]
         results.append(metrics_pca)
-        print(f"  {clf_name:>16s}  PCA   | acc={metrics_pca['accuracy']:.4f}  f1={metrics_pca['f1_weighted']:.4f}  cv_acc={metrics_pca['cv_accuracy']:.4f}")
+        print(f"  {clf_name:>16s}  PCA   | AUC={metrics_pca['auc_roc']:.4f}  PR={metrics_pca['pr_auc']:.4f}  CV_AUC={metrics_pca['cv_auc_roc']:.4f}")
 
     # Store test predictions for late fusion
     return results
@@ -322,17 +332,21 @@ def run_late_fusion(
     if a_prob is not None and v_prob is not None:
         mean_prob = (a_prob + v_prob) / 2.0
         mean_pred = mean_prob.argmax(axis=1)
-        m = evaluate(y_test, mean_pred)
+        m = evaluate(y_test, mean_pred, mean_prob)
         m.update({"modality": "audio+video (late)", "classifier": "mean_prob_svm", "features": "late", "dim": 0})
-        print(f"  mean_prob_svm      | acc={m['accuracy']:.4f}  f1={m['f1_weighted']:.4f}")
+        print(f"  mean_prob_svm      | AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}")
         results.append(m)
 
     # --- Majority voting ---
     votes = np.column_stack([a_pred, v_pred])
     vote_pred = np.array([np.bincount(v).argmax() for v in votes])
-    m = evaluate(y_test, vote_pred)
+    # voting doesn't produce meaningful probabilities, just report accuracy + AUC from vote ratio
+    vote_prob = np.column_stack([
+        np.array([np.bincount(v, minlength=2) / 2.0 for v in votes])
+    ])
+    m = evaluate(y_test, vote_pred, vote_prob)
     m.update({"modality": "audio+video (late)", "classifier": "voting_svm", "features": "late", "dim": 0})
-    print(f"  voting_svm         | acc={m['accuracy']:.4f}  f1={m['f1_weighted']:.4f}")
+    print(f"  voting_svm         | AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}")
     results.append(m)
 
     return results
@@ -356,18 +370,20 @@ def _split(X_a, X_v, y, test_size, rs):
 # Plotting
 # ============================================================
 
-def plot_results(all_results: List[dict], output_dir: Path):
-    """Generate comparison bar chart and confusion matrices."""
+def plot_results(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: Path):
+    """Generate comparison bar chart, ROC curves, and PR curves."""
     df = pd.DataFrame(all_results)
     metrics_csv = output_dir / "metrics.csv"
     df.to_csv(str(metrics_csv), index=False)
     print(f"\nMetrics saved to {metrics_csv}")
+    rs = cfg["baseline"]["random_state"]
+    test_size = cfg["baseline"]["test_size"]
 
-    # --- Bar chart: accuracy by method ---
+    # --- Bar chart: AUC-ROC by method ---
     fig, ax = plt.subplots(figsize=(14, 6))
     df_plot = df.copy()
     df_plot["label"] = df_plot["modality"] + " | " + df_plot["classifier"] + " | " + df_plot["features"]
-    df_plot = df_plot.sort_values("accuracy", ascending=True)
+    df_plot = df_plot.sort_values("auc_roc", ascending=True)
 
     colors = []
     for _, row in df_plot.iterrows():
@@ -380,14 +396,13 @@ def plot_results(all_results: List[dict], output_dir: Path):
         else:
             colors.append("#f39c12")
 
-    bars = ax.barh(range(len(df_plot)), df_plot["accuracy"], color=colors)
+    ax.barh(range(len(df_plot)), df_plot["auc_roc"], color=colors)
     ax.set_yticks(range(len(df_plot)))
     ax.set_yticklabels(df_plot["label"], fontsize=8)
-    ax.set_xlabel("Accuracy")
-    ax.set_title("Baseline Comparison: pre vs stage 1-4 Classification", fontweight="bold")
+    ax.set_xlabel("AUC-ROC")
+    ax.set_title("Baseline Comparison: pre vs stage 1-4 (AUC-ROC)", fontweight="bold")
     ax.axvline(x=0.5, color="gray", linestyle="--", alpha=0.5)
 
-    # Legend
     from matplotlib.patches import Patch
     legend_elements = [
         Patch(facecolor="#2ecc71", label="Audio only"),
@@ -401,13 +416,79 @@ def plot_results(all_results: List[dict], output_dir: Path):
     plt.close(fig)
     print(f"  Saved: {output_dir / 'comparison_bar.png'}")
 
+    # --- ROC + PR curves for top-6 methods ---
+    top6 = df.nlargest(6, "auc_roc")
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(14, 6))
+
+    for ax, curve_name, curve_fn, baseline_val in [
+        (ax_roc, "ROC", roc_curve, None),
+        (ax_pr, "Precision-Recall", precision_recall_curve, y.mean()),
+    ]:
+        for _, row in top6.iterrows():
+            mod = row["modality"]
+            clf_name = row["classifier"]
+            feat = row["features"]
+
+            # Build X
+            if "audio+video" in mod and "late" not in str(feat):
+                X = np.concatenate([X_audio, X_video], axis=1)
+            elif "audio" in mod:
+                X = X_audio
+            else:
+                X = X_video
+
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, random_state=rs, stratify=y)
+            scaler = StandardScaler()
+            X_tr = scaler.fit_transform(X_tr)
+            X_te = scaler.transform(X_te)
+
+            if "pca" in str(feat):
+                from sklearn.decomposition import PCA as PCA2
+                pca_m = PCA2(n_components=cfg["baseline"]["pca_variance"], random_state=rs)
+                X_tr = pca_m.fit_transform(X_tr)
+                X_te = pca_m.transform(X_te)
+
+            clf = make_classifier(clf_name, rs)
+            clf.fit(X_tr, y_tr)
+            try:
+                y_prob = clf.predict_proba(X_te)[:, 1]
+            except Exception:
+                continue
+
+            if curve_name == "ROC":
+                fpr, tpr, _ = curve_fn(y_te, y_prob)
+                label = f"{mod[:20]} | {clf_name} | {feat}"
+                if len(label) > 35:
+                    label = label[:32] + "..."
+                ax.plot(fpr, tpr, linewidth=1.5, label=label)
+            else:
+                prec, rec, _ = curve_fn(y_te, y_prob)
+                ax.plot(rec, prec, linewidth=1.5)
+
+        if curve_name == "ROC":
+            ax.plot([0, 1], [0, 1], "k--", alpha=0.3, linewidth=1)
+            ax.set_xlabel("False Positive Rate")
+            ax.set_ylabel("True Positive Rate")
+            ax.set_title("ROC Curves (top-6)", fontweight="bold")
+            ax.legend(fontsize=7, loc="lower right")
+        else:
+            ax.axhline(y=baseline_val, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+            ax.set_xlabel("Recall")
+            ax.set_ylabel("Precision")
+            ax.set_title("Precision-Recall Curves (top-6)", fontweight="bold")
+
+    fig.tight_layout()
+    fig.savefig(str(output_dir / "roc_pr_curves.png"), dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_dir / 'roc_pr_curves.png'}")
+
 
 def plot_confusion_matrices(all_results: List[dict], X_audio, X_video, y, cfg, output_dir: Path):
     """Generate confusion matrices for top-3 methods."""
     from sklearn.model_selection import train_test_split as tts
 
     df = pd.DataFrame(all_results)
-    top3 = df.nlargest(3, "accuracy")
+    top3 = df.nlargest(3, "auc_roc")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     rs = cfg["baseline"]["random_state"]
@@ -470,9 +551,9 @@ def write_report(all_results: List[dict], output_dir: Path):
     df = pd.DataFrame(all_results)
     report_path = output_dir / "report.txt"
 
-    best = df.loc[df["accuracy"].idxmax()]
-    audio_best = df[df["modality"] == "audio"].loc[df[df["modality"] == "audio"]["accuracy"].idxmax()]
-    video_best = df[df["modality"] == "video"].loc[df[df["modality"] == "video"]["accuracy"].idxmax()]
+    best = df.loc[df["auc_roc"].idxmax()]
+    audio_best = df[df["modality"] == "audio"].loc[df[df["modality"] == "audio"]["auc_roc"].idxmax()]
+    video_best = df[df["modality"] == "video"].loc[df[df["modality"] == "video"]["auc_roc"].idxmax()]
 
     lines = [
         "=" * 60,
@@ -483,26 +564,26 @@ def write_report(all_results: List[dict], output_dir: Path):
         f"  Total methods evaluated: {len(df)}",
         "",
         "-" * 40,
-        "  Best overall",
+        "  Best overall (by AUC-ROC)",
         "-" * 40,
         f"  Method    : {best['modality']} | {best['classifier']} | {best['features']}",
-        f"  Accuracy  : {best['accuracy']:.4f}",
-        f"  F1 (wtd)  : {best['f1_weighted']:.4f}",
-        f"  CV Acc    : {best.get('cv_accuracy', 'N/A')}",
+        f"  AUC-ROC   : {best['auc_roc']:.4f}",
+        f"  PR-AUC    : {best['pr_auc']:.4f}",
+        f"  CV AUC    : {best.get('cv_auc_roc', 'N/A')}",
         "",
         "-" * 40,
-        "  Best audio-only",
+        "  Best audio-only (by AUC-ROC)",
         "-" * 40,
         f"  Method    : {audio_best['classifier']} | {audio_best['features']}",
-        f"  Accuracy  : {audio_best['accuracy']:.4f}",
-        f"  F1 (wtd)  : {audio_best['f1_weighted']:.4f}",
+        f"  AUC-ROC   : {audio_best['auc_roc']:.4f}",
+        f"  PR-AUC    : {audio_best['pr_auc']:.4f}",
         "",
         "-" * 40,
-        "  Best video-only",
+        "  Best video-only (by AUC-ROC)",
         "-" * 40,
         f"  Method    : {video_best['classifier']} | {video_best['features']}",
-        f"  Accuracy  : {video_best['accuracy']:.4f}",
-        f"  F1 (wtd)  : {video_best['f1_weighted']:.4f}",
+        f"  AUC-ROC   : {video_best['auc_roc']:.4f}",
+        f"  PR-AUC    : {video_best['pr_auc']:.4f}",
         "",
         "-" * 40,
         "  Full results table",
@@ -510,9 +591,8 @@ def write_report(all_results: List[dict], output_dir: Path):
         "",
     ]
 
-    # Format as table
-    cols = ["modality", "classifier", "features", "accuracy", "f1_weighted", "cv_accuracy"]
-    tbl = df[cols].sort_values("accuracy", ascending=False)
+    cols = ["modality", "classifier", "features", "auc_roc", "pr_auc", "cv_auc_roc", "cv_pr_auc"]
+    tbl = df[cols].sort_values("auc_roc", ascending=False)
     lines.append(tbl.to_string(index=False))
     lines.append("")
     lines.append("=" * 60)
@@ -567,7 +647,7 @@ def main():
 
     # ---- Plots & report ----
     print("\n--- Generating Plots & Report ---")
-    plot_results(all_results, results_dir)
+    plot_results(all_results, X_audio, X_video, y, cfg, results_dir)
     plot_confusion_matrices(all_results, X_audio, X_video, y, cfg, results_dir)
     write_report(all_results, results_dir)
 
