@@ -53,18 +53,23 @@ def load_labels(label_path: str) -> pd.DataFrame:
 
 def _find_id_column(df: pd.DataFrame) -> str | None:
     """Scan columns for a likely subject-ID column."""
+    def _has_hd_pattern(col: str) -> bool:
+        """Check if any value in this column matches HDXXX."""
+        for val in df[col].head(10):
+            if extract_subject_id(str(val)):
+                return True
+        return False
+
     # Priority order
     for candidate in ["sample_id", "filename"]:
         if candidate in df.columns:
-            # Quick sanity check: does the first value look like HDXXX?
-            sample = str(df[candidate].iloc[0])
-            if extract_subject_id(sample):
+            if _has_hd_pattern(candidate):
                 return candidate
-    # Fallback: any column with "id" in name
+    # Fallback: any column with "id" or "name" in name
     for col in df.columns:
-        if "id" in str(col).lower():
-            sample = str(df[col].iloc[0])
-            if extract_subject_id(sample):
+        lower = str(col).lower()
+        if "id" in lower or "name" in lower:
+            if _has_hd_pattern(col):
                 return col
     return None
 
