@@ -26,23 +26,47 @@ def load_labels(label_path: str) -> pd.DataFrame:
     """
     Load the label xlsx.
 
-    Expected columns: ``sample_id`` (HDXXX), ``stages`` (pre/1/2/...).
+    Auto-detects the subject-ID column (looks for ``sample_id``, ``filename``, or
+    any column containing "id").  Requires a ``stages`` column.
 
     Returns DataFrame with index = normalized subject ID, columns = [stage, ...].
     """
     df = pd.read_excel(label_path)
-    if "sample_id" not in df.columns:
-        raise KeyError(f"Label file must have a 'sample_id' column. Found: {list(df.columns)}")
+
     if "stages" not in df.columns:
         raise KeyError(f"Label file must have a 'stages' column. Found: {list(df.columns)}")
 
+    # --- auto-detect subject-ID column ---
+    id_col = _find_id_column(df)
+    if id_col is None:
+        raise KeyError(
+            f"Could not find a subject-ID column (tried: sample_id, filename, "
+            f"or any column with 'id' in name).  Found: {list(df.columns)}"
+        )
+
     # Normalize subject IDs
-    df["subject_id"] = df["sample_id"].apply(
-        lambda x: extract_subject_id(str(x))
-    )
+    df["subject_id"] = df[id_col].apply(lambda x: extract_subject_id(str(x)))
     df = df.dropna(subset=["subject_id"])
     df = df.set_index("subject_id")
     return df[["stages"]]
+
+
+def _find_id_column(df: pd.DataFrame) -> str | None:
+    """Scan columns for a likely subject-ID column."""
+    # Priority order
+    for candidate in ["sample_id", "filename"]:
+        if candidate in df.columns:
+            # Quick sanity check: does the first value look like HDXXX?
+            sample = str(df[candidate].iloc[0])
+            if extract_subject_id(sample):
+                return candidate
+    # Fallback: any column with "id" in name
+    for col in df.columns:
+        if "id" in str(col).lower():
+            sample = str(df[col].iloc[0])
+            if extract_subject_id(sample):
+                return col
+    return None
 
 
 def load_memtrax(memtrax_path: str) -> pd.DataFrame:
@@ -56,14 +80,7 @@ def load_memtrax(memtrax_path: str) -> pd.DataFrame:
     df = pd.read_excel(memtrax_path)
 
     # Try to find the subject ID column
-    id_col = None
-    for col in df.columns:
-        if "id" in str(col).lower() or "subject" in str(col).lower() or "sample" in str(col).lower():
-            sample = df[col].iloc[0]
-            if extract_subject_id(str(sample)):
-                id_col = col
-                break
-
+    id_col = _find_id_column(df)
     if id_col is None:
         raise KeyError(
             f"Could not find a subject-ID column in MemTrax file. "
