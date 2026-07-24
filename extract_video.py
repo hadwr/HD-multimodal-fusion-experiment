@@ -29,7 +29,6 @@ import torch
 from tqdm import tqdm
 
 from utils import (
-    extract_subject_id,
     load_config,
     resolve_model_path,
     save_embedding,
@@ -41,6 +40,7 @@ from window_utils import (
     parse_window_sizes,
     save_window_embeddings,
 )
+from video_discovery import discover_video_sources
 
 
 def load_videomae_local(
@@ -383,6 +383,22 @@ def main():
     parser.add_argument("--overlap", type=float, default=None)
     parser.add_argument("--amp", action="store_true", help="Use CUDA float16 autocast")
     parser.add_argument("--subject-ids", default=None, help="Comma-separated HD IDs")
+    parser.add_argument(
+        "--collections",
+        default=None,
+        help="Comma-separated collection folders below paths.video_dir",
+    )
+    parser.add_argument(
+        "--include-hc",
+        action="store_true",
+        help="Also scan paths.hc_video_dir as a separate HC collection",
+    )
+    parser.add_argument("--preferred-video-name", default=None)
+    parser.add_argument(
+        "--list-videos",
+        action="store_true",
+        help="List discovered subject/video mappings and exit before model loading",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Process only first N subjects")
     parser.add_argument("--max-windows-per-size", type=int, default=None)
     args = parser.parse_args()
@@ -407,6 +423,27 @@ def main():
     )
 
     video_dir = cfg["paths"]["video_dir"]
+    collections = (
+        [item.strip() for item in args.collections.split(",") if item.strip()]
+        if args.collections
+        else list(cfg["paths"].get("video_collections", []))
+    )
+    if not collections:
+        raise ValueError("paths.video_collections must contain at least one folder")
+    if args.include_hc:
+        hc_dir = cfg["paths"].get("hc_video_dir")
+        if not hc_dir:
+            raise ValueError("--include-hc requires paths.hc_video_dir")
+        hc_path = Path(hc_dir)
+        if hc_path.parent != Path(video_dir):
+            raise ValueError(
+                "paths.hc_video_dir must currently be directly below paths.video_dir"
+            )
+        collections.append(hc_path.name)
+    preferred_filename = (
+        args.preferred_video_name
+        or video_cfg.get("preferred_filename", "4.mp4")
+    )
     output_dir = Path(cfg["paths"]["output_dir"])
     global_out = output_dir / "emb" / "video"
     window_out = (
@@ -419,6 +456,7 @@ def main():
 
     print("=== Corrected VideoMAE Embedding Extraction ===")
     print(f"  Video dir       : {video_dir}")
+    print(f"  Collections     : {collections}")
     print(f"  Mode            : {mode}")
     print(f"  Pooling         : {pool_mode} (all patch tokens; no CLS)")
     print(f"  Window sizes    : {window_sizes} sec, overlap={overlap:.2f}")
@@ -429,6 +467,39 @@ def main():
     if not Path(video_dir).is_dir():
         print(f"[ERROR] Video directory not found: {video_dir}")
         sys.exit(1)
+
+    sources = discover_video_sources(
+        Path(video_dir),
+        collections,
+        preferred_filename=preferred_filename,
+    )
+    if args.subject_ids:
+        requested_ids = {
+            value.strip().upper()
+            for value in args.subject_ids.split(",")
+            if value.strip()
+        }
+        sources = [
+            source for source in sources if source.subject_id in requested_ids
+        ]
+    if args.limit is not None:
+        sources = sources[: args.limit]
+    if not sources:
+        print("[ERROR] No requested HDXXX/HCXXX videos found")
+        sys.exit(1)
+    collection_counts = {}
+    for source in sources:
+        collection_counts[source.collection] = (
+            collection_counts.get(source.collection, 0) + 1
+        )
+    print(f"  Videos found    : {len(sources)} {collection_counts}")
+    if args.list_videos:
+        for source in sources:
+            print(
+                f"  {source.subject_id}\t{source.collection}\t"
+                f"{source.video_path}"
+            )
+        return
 
     model_local = args.model_path or video_cfg.get("local_path")
     local_path = resolve_model_path(
@@ -451,34 +522,10 @@ def main():
     if load_report["missing_keys"]:
         print(f"  Missing keys    : {load_report['missing_keys'][:8]}")
 
-    subdirs = sorted(
-        path
-        for path in Path(video_dir).iterdir()
-        if path.is_dir() and extract_subject_id(path.name) is not None
-    )
-    if args.subject_ids:
-        requested_ids = {
-            value.strip().upper()
-            for value in args.subject_ids.split(",")
-            if value.strip()
-        }
-        subdirs = [
-            path for path in subdirs if extract_subject_id(path.name) in requested_ids
-        ]
-    if args.limit is not None:
-        subdirs = subdirs[: args.limit]
-    if not subdirs:
-        print(f"[ERROR] No HDXXX directories found in {video_dir}")
-        sys.exit(1)
-
     failures = 0
-    for subdir in tqdm(subdirs, desc="Extracting video"):
-        sid = extract_subject_id(subdir.name)
-        video_path = subdir / "4.mp4"
-        if not video_path.exists():
-            print(f"  [Skip] {sid}: 4.mp4 not found")
-            failures += 1
-            continue
+    for source in tqdm(sources, desc="Extracting video"):
+        sid = source.subject_id
+        video_path = source.video_path
         try:
             metadata = read_video_metadata(str(video_path))
             if mode in {"global", "both"}:
@@ -516,6 +563,7 @@ def main():
                     record,
                     metadata={
                         "source": str(video_path),
+                        "collection": source.collection,
                         "fps": fps,
                         "duration_sec": duration_sec,
                         "pool": pool_mode,
@@ -531,7 +579,7 @@ def main():
 
             traceback.print_exc()
 
-    print(f"Done. Subjects={len(subdirs)}, failures={failures}")
+    print(f"Done. Subjects={len(sources)}, failures={failures}")
     if failures:
         sys.exit(2)
 

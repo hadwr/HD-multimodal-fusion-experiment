@@ -6,8 +6,14 @@ paths:
   # Audio: /public/labdata/.../HDacoustic/HDXXX.wav
   audio_dir: /public/labdata/huangda/HD/Data/dataset/HD_final/HDacoustic
 
-  # Video: /NAS/.../preprocessed_audio/HDXXX/4.mp4
+  # Video collections: <video_dir>/<collection>/HDXXX/*.mp4
   video_dir: /NAS/public2_data/huangda/preprocessed_audio
+  video_collections:
+    - A录像无量表
+    - A录像+运动量表+TFC
+    - HD241-HD272
+    - HD272-HD309
+    - 视屏编号整理（HD178开始）
 
   # MemTrax xlsx (one row per subject, columns = metrics)
   memtrax_xlsx: null  # TODO: fill in the actual path
@@ -20,7 +26,7 @@ paths:
 
   # HC (healthy control) data — separate folder, no scales
   hc_audio_dir: null  # TODO: fill in if available
-  hc_video_dir: null  # TODO: fill in if available
+  hc_video_dir: /NAS/public2_data/huangda/preprocessed_audio/HC_video
 
 # ------------------------------------------------------------
 # Model configuration (via ModelScope → transformers)
@@ -43,12 +49,13 @@ models:
     # ModelScope model ID (used only when download is explicitly allowed)
     ms_name: OpenGVLab/VideoMAE2
     # Existing ModelScope snapshot; extraction is local-only by default.
-    local_path: /public/labdata/huangda/HD/models/modelscope/models/OpenGVLab/VideoMAE2
+    local_path: /public/labdata/huangda/HD/models/modelscope/models/OpenGVLab/VideoMAE2_clean
     # Raw checkpoint inside the OpenGVLab bundle (base encoder, 768d).
     checkpoint: mae-b/pytorch_model.bin
     frame_count: 16
     img_size: 224
     fps: null
+    preferred_filename: 4.mp4
 
 # ------------------------------------------------------------
 # Sliding-window embedding extraction

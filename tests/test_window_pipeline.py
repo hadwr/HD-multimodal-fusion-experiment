@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from utils import resolve_model_path
+from video_discovery import discover_video_sources
 from window_experiments import (
     classification_metrics,
     nested_late_fusion_predict,
@@ -28,6 +29,33 @@ except ModuleNotFoundError:
 
 
 class WindowUtilityTests(unittest.TestCase):
+    def test_nested_video_collection_discovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            first = base / "A录像无量表" / "batch" / "HD001"
+            second = base / "HD241-HD272" / "HD241"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "4.mp4").touch()
+            (second / "recording.mp4").touch()
+            sources = discover_video_sources(
+                base, ["A录像无量表", "HD241-HD272"]
+            )
+            self.assertEqual(
+                [(item.subject_id, item.video_path.name) for item in sources],
+                [("HD001", "4.mp4"), ("HD241", "recording.mp4")],
+            )
+
+    def test_duplicate_subject_videos_are_not_silently_selected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            for collection in ("one", "two"):
+                folder = base / collection / "HD001"
+                folder.mkdir(parents=True)
+                (folder / f"{collection}.mp4").touch()
+            with self.assertRaises(ValueError):
+                discover_video_sources(base, ["one", "two"])
+
     def test_model_resolver_reuses_cache_without_download(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cached = Path(temp_dir) / "OpenGVLab" / "VideoMAE2"
