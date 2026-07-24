@@ -393,7 +393,6 @@ def main():
         action="store_true",
         help="Also scan paths.hc_video_dir as a separate HC collection",
     )
-    parser.add_argument("--preferred-video-name", default=None)
     parser.add_argument(
         "--list-videos",
         action="store_true",
@@ -440,10 +439,6 @@ def main():
                 "paths.hc_video_dir must currently be directly below paths.video_dir"
             )
         collections.append(hc_path.name)
-    preferred_filename = (
-        args.preferred_video_name
-        or video_cfg.get("preferred_filename", "4.mp4")
-    )
     output_dir = Path(cfg["paths"]["output_dir"])
     global_out = output_dir / "emb" / "video"
     window_out = (
@@ -471,7 +466,6 @@ def main():
     sources = discover_video_sources(
         Path(video_dir),
         collections,
-        preferred_filename=preferred_filename,
     )
     if args.subject_ids:
         requested_ids = {

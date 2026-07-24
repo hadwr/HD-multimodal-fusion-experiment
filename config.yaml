@@ -55,7 +55,6 @@ models:
     frame_count: 16
     img_size: 224
     fps: null
-    preferred_filename: 4.mp4
 
 # ------------------------------------------------------------
 # Sliding-window embedding extraction

@@ -7,6 +7,10 @@ from typing import Dict, List, Optional, Sequence
 
 
 VIDEO_SUBJECT_PATTERN = re.compile(r"(HD|HC)\d{3}", re.IGNORECASE)
+VIDEO_TAKE_PATTERN = re.compile(
+    r"^4\s*(?:[（(]\s*(\d+)\s*[）)])?\.mp4$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -28,18 +32,17 @@ def video_subject_id(path: Path) -> Optional[str]:
 def discover_video_sources(
     base_dir: Path,
     collections: Sequence[str],
-    preferred_filename: str = "4.mp4",
 ) -> List[VideoSource]:
-    """Recursively locate one unambiguous MP4 per subject.
+    """Recursively select the first ``4`` recording for each subject.
 
-    If a subject directory contains multiple files, ``preferred_filename`` is
-    selected only when it uniquely resolves the subject. Duplicate preferred
-    files across collections are treated as an error instead of silently
-    overwriting one recording with another.
+    ``4.mp4`` is first, followed by duplicate names such as ``4（1）.mp4`` and
+    ``4(1).mp4`` in numeric order. If a subject occurs in multiple collections,
+    the configured collection order is the deterministic tie-breaker. Subjects
+    with no matching ``4`` recording are logged and skipped.
     """
     grouped: Dict[str, List[tuple]] = {}
     missing = []
-    for collection in collections:
+    for collection_index, collection in enumerate(collections):
         collection_dir = base_dir / collection
         if not collection_dir.is_dir():
             missing.append(str(collection_dir))
@@ -49,7 +52,9 @@ def discover_video_sources(
                 continue
             subject_id = video_subject_id(path.parent)
             if subject_id:
-                grouped.setdefault(subject_id, []).append((path, collection))
+                grouped.setdefault(subject_id, []).append(
+                    (path, collection, collection_index)
+                )
 
     if missing:
         raise FileNotFoundError(
@@ -63,34 +68,46 @@ def discover_video_sources(
         )
 
     selected: List[VideoSource] = []
-    ambiguous = []
-    preferred_lower = preferred_filename.lower()
     for subject_id, candidates in sorted(grouped.items()):
-        unique = sorted(set(candidates), key=lambda item: str(item[0]))
-        preferred = [
-            item for item in unique if item[0].name.lower() == preferred_lower
-        ]
-        if len(preferred) == 1:
-            chosen = preferred[0]
-        elif len(unique) == 1:
-            chosen = unique[0]
-        else:
-            ambiguous.append(
-                f"{subject_id}: " + ", ".join(str(path) for path, _ in unique)
+        unique = list(
+            {
+                (str(path), collection, collection_index): (
+                    path,
+                    collection,
+                    collection_index,
+                )
+                for path, collection, collection_index in candidates
+            }.values()
+        )
+        matching = []
+        for path, collection, collection_index in unique:
+            match = VIDEO_TAKE_PATTERN.fullmatch(path.name)
+            if match:
+                # Exact 4.mp4 ranks before copy 1, copy 2, ...
+                copy_index = int(match.group(1) or 0)
+                matching.append(
+                    (copy_index, collection_index, str(path), path, collection)
+                )
+        if not matching:
+            print(
+                f"  [Skip] {subject_id}: no 4.mp4/4(n).mp4 recording; "
+                "available MP4 files: "
+                + ", ".join(path.name for path, _, _ in unique)
             )
             continue
+        matching.sort(key=lambda item: item[:3])
+        _, _, _, chosen_path, chosen_collection = matching[0]
+        if len(matching) > 1:
+            print(
+                f"  [Select] {subject_id}: using {chosen_path}; "
+                f"ignored {len(matching) - 1} duplicate 4 recording(s)"
+            )
         selected.append(
             VideoSource(
                 subject_id=subject_id,
-                video_path=chosen[0],
-                collection=chosen[1],
+                video_path=chosen_path,
+                collection=chosen_collection,
             )
         )
 
-    if ambiguous:
-        raise ValueError(
-            "Multiple MP4 files found for the same subject and no unique "
-            f"'{preferred_filename}' could resolve them:\n  "
-            + "\n  ".join(ambiguous[:20])
-        )
     return selected

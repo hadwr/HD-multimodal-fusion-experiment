@@ -37,24 +37,43 @@ class WindowUtilityTests(unittest.TestCase):
             first.mkdir(parents=True)
             second.mkdir(parents=True)
             (first / "4.mp4").touch()
-            (second / "recording.mp4").touch()
+            (first / "4（1）.mp4").touch()
+            (first / "4(1).mp4").touch()
+            (second / "4.mp4").touch()
             sources = discover_video_sources(
                 base, ["A录像无量表", "HD241-HD272"]
             )
             self.assertEqual(
                 [(item.subject_id, item.video_path.name) for item in sources],
-                [("HD001", "4.mp4"), ("HD241", "recording.mp4")],
+                [("HD001", "4.mp4"), ("HD241", "4.mp4")],
             )
 
-    def test_duplicate_subject_videos_are_not_silently_selected(self):
+    def test_first_numbered_4_copy_is_used_when_exact_file_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
-            for collection in ("one", "two"):
-                folder = base / collection / "HD001"
-                folder.mkdir(parents=True)
-                (folder / f"{collection}.mp4").touch()
-            with self.assertRaises(ValueError):
-                discover_video_sources(base, ["one", "two"])
+            folder = base / "one" / "HD001"
+            folder.mkdir(parents=True)
+            (folder / "4（2）.mp4").touch()
+            (folder / "4（1）.mp4").touch()
+            sources = discover_video_sources(base, ["one"])
+            self.assertEqual(
+                [(source.subject_id, source.video_path.name) for source in sources],
+                [("HD001", "4（1）.mp4")],
+            )
+
+    def test_subject_without_any_4_recording_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            missing = base / "one" / "HD001"
+            valid = base / "one" / "HD002"
+            missing.mkdir(parents=True)
+            valid.mkdir(parents=True)
+            (missing / "recording.mp4").touch()
+            (valid / "4.mp4").touch()
+            sources = discover_video_sources(base, ["one"])
+            self.assertEqual(
+                [source.subject_id for source in sources], ["HD002"]
+            )
 
     def test_model_resolver_reuses_cache_without_download(self):
         with tempfile.TemporaryDirectory() as temp_dir:

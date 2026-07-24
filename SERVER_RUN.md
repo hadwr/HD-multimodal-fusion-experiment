@@ -34,6 +34,10 @@ status 2 after completing the remaining subjects.
 Video discovery scans the configured collection folders recursively:
 `A录像无量表`, `A录像+运动量表+TFC`, `HD241-HD272`, `HD272-HD309`, and
 `视屏编号整理（HD178开始）`. Add `--include-hc` to scan `HC_video`.
+For each subject, the first available take is used in this order:
+`4.mp4`, `4（1）.mp4`/`4(1).mp4`, `4（2）.mp4`/`4(2).mp4`, and so on.
+Remaining copies are ignored. Only a subject without any matching `4` take is
+logged as `[Skip]`.
 Use `python extract_video.py --list-videos` to verify all mappings without
 loading the model or decoding videos.
 
