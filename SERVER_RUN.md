@@ -7,7 +7,7 @@ Run the following commands after syncing this repository to the server.
 
 ```bash
 python -m py_compile \
-  utils.py window_utils.py extract_audio.py extract_video.py \
+  utils.py window_utils.py videomaev2_native.py extract_audio.py extract_video.py \
   baseline_experiments.py fusion_baseline.py window_experiments.py
 
 python -m unittest discover -s tests -v

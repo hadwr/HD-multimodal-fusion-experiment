@@ -44,6 +44,8 @@ models:
     ms_name: OpenGVLab/VideoMAE2
     # Existing ModelScope snapshot; extraction is local-only by default.
     local_path: /public/labdata/huangda/HD/models/modelscope/models/OpenGVLab/VideoMAE2
+    # Raw checkpoint inside the OpenGVLab bundle (base encoder, 768d).
+    checkpoint: mae-b/pytorch_model.bin
     frame_count: 16
     img_size: 224
     fps: null

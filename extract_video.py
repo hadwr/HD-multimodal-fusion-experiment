@@ -43,15 +43,94 @@ from window_utils import (
 )
 
 
-def load_videomae_local(local_path: str, device: str = "cuda"):
-    """Load a Hugging Face-compatible VideoMAE checkpoint."""
-    from transformers import VideoMAEImageProcessor, VideoMAEModel
+def load_videomae_local(
+    local_path: str,
+    device: str = "cuda",
+    checkpoint: Optional[str] = None,
+    num_frames: int = 16,
+    image_size: int = 224,
+):
+    """Load either a Transformers model or OpenGVLab's raw VideoMAE V2 bundle."""
+    from transformers import VideoMAEImageProcessor
 
-    processor = VideoMAEImageProcessor.from_pretrained(local_path)
-    model = VideoMAEModel.from_pretrained(local_path)
+    root = Path(local_path)
+    raw_checkpoint = (
+        root / checkpoint
+        if checkpoint
+        else root / "mae-b" / "pytorch_model.bin"
+    )
+    if raw_checkpoint.is_file() and not (root / "config.json").is_file():
+        from videomaev2_native import load_native_videomaev2_base
+
+        # The raw checkpoint bundle has no preprocessing metadata. These are
+        # the standard VideoMAE ImageNet normalization/crop defaults.
+        processor = VideoMAEImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": image_size},
+            do_center_crop=True,
+            crop_size={"height": image_size, "width": image_size},
+            image_mean=[0.485, 0.456, 0.406],
+            image_std=[0.229, 0.224, 0.225],
+        )
+        model, report = load_native_videomaev2_base(
+            str(raw_checkpoint),
+            device=device,
+            num_frames=num_frames,
+            image_size=image_size,
+        )
+        return model, processor, report
+
+    try:
+        processor = VideoMAEImageProcessor.from_pretrained(
+            local_path, local_files_only=True
+        )
+    except OSError:
+        processor = VideoMAEImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": image_size},
+            do_center_crop=True,
+            crop_size={"height": image_size, "width": image_size},
+            image_mean=[0.485, 0.456, 0.406],
+            image_std=[0.229, 0.224, 0.225],
+        )
+
+    with open(root / "config.json", encoding="utf-8") as handle:
+        import json
+
+        model_config = json.load(handle)
+    if model_config.get("auto_map"):
+        from transformers import AutoConfig, AutoModel
+
+        config = AutoConfig.from_pretrained(
+            local_path, trust_remote_code=True, local_files_only=True
+        )
+        model = AutoModel.from_pretrained(
+            local_path,
+            config=config,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        model._hd_pixel_layout = "bcthw"
+        backend = "videomaev2_transformers_custom"
+    else:
+        from transformers import VideoMAEModel
+
+        model = VideoMAEModel.from_pretrained(
+            local_path, local_files_only=True
+        )
+        model._hd_pixel_layout = "btchw"
+        backend = "videomae_transformers"
     model = model.to(device)
     model.eval()
-    return model, processor
+    report = {
+        "backend": backend,
+        "checkpoint": str(root),
+        "parameter_coverage": 1.0,
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "hidden_size": getattr(model.config, "hidden_size", "unknown"),
+    }
+    return model, processor, report
 
 
 def read_video_metadata(video_path: str) -> Tuple[int, float, float]:
@@ -169,6 +248,8 @@ def encode_video_frames(
     """Encode already sampled frames."""
     inputs = processor(list(frames), return_tensors="pt")
     pixel_values = inputs["pixel_values"].to(device)
+    if getattr(model, "_hd_pixel_layout", "btchw") == "bcthw":
+        pixel_values = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
     amp_context = (
         torch.autocast(device_type="cuda", dtype=torch.float16)
         if use_amp and str(device).startswith("cuda")
@@ -176,7 +257,20 @@ def encode_video_frames(
     )
     with amp_context:
         outputs = model(pixel_values=pixel_values)
-        embedding = pool_video_hidden(outputs.last_hidden_state, pool_mode=pool_mode)
+        if isinstance(outputs, torch.Tensor):
+            if outputs.ndim == 3:
+                embedding = pool_video_hidden(outputs, pool_mode=pool_mode)
+            elif outputs.ndim == 2 and pool_mode == "mean":
+                embedding = outputs
+            else:
+                raise ValueError(
+                    f"model returned {tuple(outputs.shape)}; "
+                    f"pool={pool_mode} is not supported"
+                )
+        else:
+            embedding = pool_video_hidden(
+                outputs.last_hidden_state, pool_mode=pool_mode
+            )
     return embedding.squeeze(0).float().cpu().numpy()
 
 
@@ -343,9 +437,19 @@ def main():
         cache_dir=cfg["models"].get("cache_dir"),
         allow_download=args.allow_model_download,
     )
-    model, processor = load_videomae_local(local_path, device=device)
-    print(f"  Architecture    : {getattr(model.config, 'architectures', None)}")
-    print(f"  Hidden size     : {getattr(model.config, 'hidden_size', 'unknown')}")
+    model, processor, load_report = load_videomae_local(
+        local_path,
+        device=device,
+        checkpoint=video_cfg.get("checkpoint"),
+        num_frames=num_frames,
+        image_size=img_size,
+    )
+    print(f"  Backend         : {load_report['backend']}")
+    print(f"  Checkpoint      : {load_report['checkpoint']}")
+    print(f"  Weight coverage : {load_report['parameter_coverage']:.1%}")
+    print(f"  Hidden size     : {load_report['hidden_size']}")
+    if load_report["missing_keys"]:
+        print(f"  Missing keys    : {load_report['missing_keys'][:8]}")
 
     subdirs = sorted(
         path
