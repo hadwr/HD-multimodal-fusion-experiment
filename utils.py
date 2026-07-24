@@ -45,17 +45,26 @@ def load_config(config_path: str = "config.yaml") -> dict:
 # ModelScope → transformers bridge
 # ============================================================
 
-def resolve_model_path(local_path: Optional[str], ms_model_id: str, cache_dir: Optional[str] = None) -> str:
+def resolve_model_path(
+    local_path: Optional[str],
+    ms_model_id: str,
+    cache_dir: Optional[str] = None,
+    allow_download: bool = True,
+) -> str:
     """
-    Resolve model path: use ``local_path`` if provided, otherwise download from ModelScope.
+    Resolve a local model directory, optionally allowing a ModelScope download.
 
     Parameters
     ----------
     local_path : str or None
-        Pre-downloaded model directory. If set, returned as-is.
+        Pre-downloaded model directory.
     ms_model_id : str
         ModelScope model ID, used only if local_path is None.
     cache_dir : str, optional
+        ModelScope cache root. The conventional ``owner/model`` location is
+        checked before any download API is called.
+    allow_download : bool
+        If false, fail instead of accessing ModelScope when no local copy exists.
 
     Returns
     -------
@@ -64,9 +73,33 @@ def resolve_model_path(local_path: Optional[str], ms_model_id: str, cache_dir: O
     """
     if local_path and Path(local_path).is_dir():
         print(f"[Model] Using local path: {local_path}")
-        return local_path
+        return str(Path(local_path).resolve())
+
+    # snapshot_download(cache_dir=...) stores ModelScope IDs using their
+    # owner/model hierarchy. Check common cache layouts directly so an already
+    # downloaded model never needs a network/cache-refresh call.
+    if cache_dir:
+        cache_root = Path(cache_dir)
+        candidates = [
+            cache_root / ms_model_id,
+            cache_root / "hub" / ms_model_id,
+            cache_root / "models" / ms_model_id,
+        ]
+        for candidate in candidates:
+            if candidate.is_dir():
+                print(f"[Model] Reusing cached local path: {candidate}")
+                return str(candidate.resolve())
+
+    attempted = [value for value in (local_path, str(Path(cache_dir) / ms_model_id) if cache_dir else None) if value]
+    if not allow_download:
+        raise FileNotFoundError(
+            "Local model directory not found. Checked: "
+            + ", ".join(attempted)
+            + ". Set models.<modality>.local_path or pass --model-path. "
+            "Use --allow-model-download only when a new download is intended."
+        )
     if local_path:
-        print(f"[Model] Local path not found: {local_path}, falling back to ModelScope.")
+        print(f"[Model] Local path not found: {local_path}; download explicitly allowed.")
     return download_model_from_modelscope(ms_model_id, cache_dir=cache_dir)
 
 

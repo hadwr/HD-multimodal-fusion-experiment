@@ -16,6 +16,10 @@ python -m unittest discover -s tests -v
 ## 2. Check model compatibility before a full run
 
 Use one GPU and keep the configured local model paths in `config.yaml`.
+Both extractors are local-only by default and will not contact ModelScope.
+If the server snapshot is stored elsewhere, pass
+`--model-path /actual/local/model/directory`. Only use
+`--allow-model-download` when a new download is intentionally required.
 
 ```bash
 python extract_video.py --mode windows --window-sizes 4 --device cuda:0 --limit 2

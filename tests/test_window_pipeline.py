@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from utils import resolve_model_path
 from window_experiments import (
     classification_metrics,
     nested_late_fusion_predict,
@@ -27,6 +28,28 @@ except ModuleNotFoundError:
 
 
 class WindowUtilityTests(unittest.TestCase):
+    def test_model_resolver_reuses_cache_without_download(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cached = Path(temp_dir) / "OpenGVLab" / "VideoMAE2"
+            cached.mkdir(parents=True)
+            resolved = resolve_model_path(
+                None,
+                "OpenGVLab/VideoMAE2",
+                cache_dir=temp_dir,
+                allow_download=False,
+            )
+            self.assertEqual(Path(resolved), cached.resolve())
+
+    def test_model_resolver_fails_closed_when_download_is_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(FileNotFoundError):
+                resolve_model_path(
+                    None,
+                    "OpenGVLab/VideoMAE2",
+                    cache_dir=temp_dir,
+                    allow_download=False,
+                )
+
     def test_even_subset_preserves_endpoints_and_limit(self):
         items = list(range(101))
         selected = evenly_spaced_subset(items, 8)

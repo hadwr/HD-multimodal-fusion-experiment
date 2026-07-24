@@ -40,10 +40,10 @@ models:
 
   video:
     hf_name: MCG-NJU/videomae-base
-    # ModelScope model ID (used only if local_path is null)
+    # ModelScope model ID (used only when download is explicitly allowed)
     ms_name: OpenGVLab/VideoMAE2
-    # Local pre-downloaded path — 如果已下载请填写，设为 null 则自动从 ModelScope 下载
-    local_path: null
+    # Existing ModelScope snapshot; extraction is local-only by default.
+    local_path: /public/labdata/huangda/HD/models/modelscope/models/OpenGVLab/VideoMAE2
     frame_count: 16
     img_size: 224
     fps: null

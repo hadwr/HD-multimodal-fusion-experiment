@@ -277,6 +277,11 @@ def main():
     parser.add_argument("--device", default=None)
     parser.add_argument("--model-path", default=None)
     parser.add_argument(
+        "--allow-model-download",
+        action="store_true",
+        help="Allow ModelScope access if no local checkpoint is found",
+    )
+    parser.add_argument(
         "--window-output-dir",
         default=None,
         help="Override output/emb_windows/audio (useful for layer/backbone ablations)",
@@ -354,6 +359,7 @@ def main():
         model_local,
         audio_cfg["ms_name"],
         cache_dir=cfg["models"].get("cache_dir"),
+        allow_download=args.allow_model_download,
     )
     model, processor = load_audio_model_local(local_path, device=device)
     print(f"  Architecture    : {getattr(model.config, 'architectures', None)}")
