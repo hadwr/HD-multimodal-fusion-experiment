@@ -49,6 +49,26 @@ models:
     fps: null
 
 # ------------------------------------------------------------
+# Sliding-window embedding extraction
+# ------------------------------------------------------------
+windowing:
+  audio:
+    mode: both              # global | windows | both
+    sizes_sec: [4, 8, 16]
+    overlap: 0.5
+    pool: mean              # mean | mean_std
+    layer: -1               # -1 = final layer; try intermediate layers separately
+    min_speech_ratio: 0.2   # energy-VAD active-frame fraction
+    vad_top_db: 35.0
+    max_windows_per_size: 128
+  video:
+    mode: both
+    sizes_sec: [2, 4, 8]
+    overlap: 0.5
+    pool: mean              # VideoMAE has no CLS token
+    max_windows_per_size: 64
+
+# ------------------------------------------------------------
 # Visualization
 # ------------------------------------------------------------
 visualization:
@@ -85,8 +105,31 @@ baseline:
   cv_folds: 5
   random_state: 42
   pca_variance: 0.95
+  cca_components: 5
   classifiers: [svm, logistic, random_forest]
-  fusion_methods: [concat, mean_prob, voting, cca]
+  fusion_methods: [concat, mean_prob, cca]
+
+# ------------------------------------------------------------
+# Leakage-safe subject-level experiments on window embeddings
+# ------------------------------------------------------------
+window_experiments:
+  outer_folds: 5
+  inner_folds: 4
+  random_state: 42
+  pca_variance: 0.95
+  classifiers: [logistic, random_forest]
+  aggregations: [mean, mean_std]
+  min_audio_speech_ratio: 0.0
+  min_video_valid_ratio: 0.0
+  bootstrap_iterations: 2000
+  n_jobs: -1
+  # Fixed, predeclared configuration for fair fusion comparison.
+  # The script uses the nearest extracted size if the exact size is absent.
+  fusion_audio_window_sec: 8
+  fusion_video_window_sec: 4
+  fusion_aggregation: mean_std
+  fusion_audio_classifier: random_forest
+  fusion_video_classifier: logistic
 
 # ------------------------------------------------------------
 # Runtime

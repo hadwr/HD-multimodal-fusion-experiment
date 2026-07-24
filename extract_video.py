@@ -1,36 +1,50 @@
 #!/usr/bin/env python3
-"""
-Extract video embeddings using VideoMAE (via ModelScope → transformers).
+"""Extract corrected global and sliding-window VideoMAE embeddings.
 
-For each ``HDXXX/4.mp4`` under the video directory, this script:
-1. Uniformly samples 16 frames, resizes to 224×224
-2. Runs VideoMAE-base, takes the CLS token (or mean-pools all patches)
-3. Saves the resulting vector as ``output/emb/video/HDXXX.npy``
+VideoMAE does not prepend a CLS token.  The old implementation used token 0,
+which is only the first spatiotemporal patch.  This implementation mean-pools
+all patch tokens and samples *continuous temporal clips* for windowed output.
 
-Usage::
+Outputs
+-------
+``output/emb/video/HDXXX.npy``
+    Corrected whole-recording baseline (16 frames spread over the recording).
+``output/emb_windows/video/HDXXX.npz``
+    Window embeddings plus start/end timestamps and window sizes.
 
-    python extract_video.py                    # use config.yaml defaults
-    python extract_video.py --device cpu       # force CPU
+Examples
+--------
+python extract_video.py --mode both
+python extract_video.py --mode windows --window-sizes 2,4,8 --overlap 0.5
 """
 
 import argparse
+from contextlib import nullcontext
 import sys
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from utils import (
+    extract_subject_id,
     load_config,
     resolve_model_path,
-    extract_subject_id,
     save_embedding,
+)
+from window_utils import (
+    WindowEmbeddings,
+    evenly_spaced_subset,
+    make_sliding_windows,
+    parse_window_sizes,
+    save_window_embeddings,
 )
 
 
 def load_videomae_local(local_path: str, device: str = "cuda"):
-    """Load VideoMAE from a local ModelScope-downloaded directory."""
+    """Load a Hugging Face-compatible VideoMAE checkpoint."""
     from transformers import VideoMAEImageProcessor, VideoMAEModel
 
     processor = VideoMAEImageProcessor.from_pretrained(local_path)
@@ -40,62 +54,132 @@ def load_videomae_local(local_path: str, device: str = "cuda"):
     return model, processor
 
 
-def sample_frames_from_video(
-    video_path: str,
-    num_frames: int = 16,
-    img_size: int = 224,
-) -> np.ndarray:
-    """
-    Uniformly sample ``num_frames`` frames from a video using OpenCV.
-
-    Returns
-    -------
-    frames : np.ndarray  shape (num_frames, H, W, C), dtype uint8, RGB
-    """
+def read_video_metadata(video_path: str) -> Tuple[int, float, float]:
+    """Return ``(total_frames, fps, duration_sec)`` using OpenCV."""
     import cv2
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
-
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    if total_frames <= 0:
-        cap.release()
-        raise ValueError(f"No video frames found in {video_path}")
-
-    # Uniform indices
-    if total_frames <= num_frames:
-        indices = list(range(total_frames))
-        while len(indices) < num_frames:
-            indices.append(indices[-1])
-    else:
-        step = total_frames / num_frames
-        indices = [int(i * step) for i in range(num_frames)]
-
-    frames = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if not ret:
-            break
-        # BGR → RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if frame.shape[0] != img_size or frame.shape[1] != img_size:
-            frame = cv2.resize(frame, (img_size, img_size))
-        frames.append(frame)
-
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
     cap.release()
 
-    # Pad if we couldn't read enough frames
+    if total_frames <= 0:
+        raise ValueError(f"No video frames found in {video_path}")
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError(
+            f"Invalid FPS ({fps}) in {video_path}. Re-encode the video or fix metadata."
+        )
+    return total_frames, fps, total_frames / fps
+
+
+def _frame_indices(
+    total_frames: int,
+    fps: float,
+    num_frames: int,
+    start_sec: float = 0.0,
+    end_sec: Optional[float] = None,
+) -> np.ndarray:
+    """Generate exactly ``num_frames`` indices inside one temporal interval."""
+    if num_frames <= 0:
+        raise ValueError("num_frames must be positive")
+    duration_sec = total_frames / fps
+    start_sec = max(0.0, float(start_sec))
+    end_sec = duration_sec if end_sec is None else min(float(end_sec), duration_sec)
+    if end_sec <= start_sec:
+        raise ValueError(f"empty video interval [{start_sec}, {end_sec}]")
+
+    first = min(int(np.floor(start_sec * fps)), total_frames - 1)
+    # end_sec is exclusive; subtracting a tiny value prevents selecting the next interval.
+    last = min(int(np.ceil(end_sec * fps - 1e-8)) - 1, total_frames - 1)
+    last = max(first, last)
+    return np.rint(np.linspace(first, last, num_frames)).astype(np.int64)
+
+
+def sample_frames_from_video(
+    video_path: str,
+    num_frames: int = 16,
+    img_size: int = 224,
+    start_sec: float = 0.0,
+    end_sec: Optional[float] = None,
+    metadata: Optional[Tuple[int, float, float]] = None,
+) -> np.ndarray:
+    """Sample frames from a continuous interval and return RGB uint8 frames."""
+    import cv2
+
+    total_frames, fps, _ = metadata or read_video_metadata(video_path)
+    indices = _frame_indices(
+        total_frames=total_frames,
+        fps=fps,
+        num_frames=num_frames,
+        start_sec=start_sec,
+        end_sec=end_sec,
+    )
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    frames: List[np.ndarray] = []
+    for index in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap.release()
+
+    if not frames:
+        raise ValueError(
+            f"Could not decode frames from {video_path} "
+            f"within [{start_sec}, {end_sec}]"
+        )
     while len(frames) < num_frames:
-        frames.append(frames[-1] if frames else np.zeros((img_size, img_size, 3), dtype=np.uint8))
+        frames.append(frames[-1].copy())
 
-    frames = np.stack(frames, axis=0)  # (T, H, W, 3)
-    return frames
+    # VideoMAEImageProcessor performs its own resize/crop and normalization.
+    return np.stack(frames[:num_frames], axis=0)
 
 
-@torch.no_grad()
+def pool_video_hidden(last_hidden: torch.Tensor, pool_mode: str = "mean") -> torch.Tensor:
+    """Pool VideoMAE patch tokens. VideoMAE has no CLS token."""
+    if last_hidden.ndim != 3:
+        raise ValueError(
+            f"expected hidden states with shape (B, tokens, dim), got {last_hidden.shape}"
+        )
+    if pool_mode == "mean":
+        return last_hidden.mean(dim=1)
+    if pool_mode == "mean_std":
+        return torch.cat(
+            [last_hidden.mean(dim=1), last_hidden.std(dim=1, unbiased=False)], dim=-1
+        )
+    raise ValueError(f"Unsupported pool mode: {pool_mode}")
+
+
+@torch.inference_mode()
+def encode_video_frames(
+    frames: np.ndarray,
+    model,
+    processor,
+    device: str = "cuda",
+    pool_mode: str = "mean",
+    use_amp: bool = False,
+) -> np.ndarray:
+    """Encode already sampled frames."""
+    inputs = processor(list(frames), return_tensors="pt")
+    pixel_values = inputs["pixel_values"].to(device)
+    amp_context = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if use_amp and str(device).startswith("cuda")
+        else nullcontext()
+    )
+    with amp_context:
+        outputs = model(pixel_values=pixel_values)
+        embedding = pool_video_hidden(outputs.last_hidden_state, pool_mode=pool_mode)
+    return embedding.squeeze(0).float().cpu().numpy()
+
+
 def extract_video_embedding(
     video_path: str,
     model,
@@ -103,119 +187,243 @@ def extract_video_embedding(
     device: str = "cuda",
     num_frames: int = 16,
     img_size: int = 224,
-    pool_mode: str = "cls",
+    pool_mode: str = "mean",
+    start_sec: float = 0.0,
+    end_sec: Optional[float] = None,
+    metadata: Optional[Tuple[int, float, float]] = None,
+    use_amp: bool = False,
 ) -> np.ndarray:
-    """
-    Load a video, run VideoMAE, return the embedding vector.
+    """Sample one interval, encode it, and pool all VideoMAE patch tokens."""
+    frames = sample_frames_from_video(
+        video_path,
+        num_frames=num_frames,
+        img_size=img_size,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        metadata=metadata,
+    )
+    return encode_video_frames(
+        frames,
+        model=model,
+        processor=processor,
+        device=device,
+        pool_mode=pool_mode,
+        use_amp=use_amp,
+    )
 
-    Parameters
-    ----------
-    video_path : str
-    model : VideoMAEModel
-    processor : VideoMAEImageProcessor
-    device : str
-    num_frames : int
-    img_size : int
-    pool_mode : str
-        "cls" → use the CLS token (first position);
-        "mean" → mean-pool all patch tokens.
 
-    Returns
-    -------
-    embedding : np.ndarray  shape (hidden_dim,)
-    """
-    # ---- sample frames ----
-    frames = sample_frames_from_video(video_path, num_frames=num_frames, img_size=img_size)
+def extract_video_windows(
+    video_path: str,
+    model,
+    processor,
+    window_sizes: List[float],
+    overlap: float,
+    device: str,
+    num_frames: int,
+    img_size: int,
+    pool_mode: str,
+    use_amp: bool,
+    max_windows_per_size: Optional[int],
+) -> Tuple[WindowEmbeddings, Tuple[int, float, float]]:
+    """Extract all requested window sizes for one video."""
+    metadata = read_video_metadata(video_path)
+    _, _, duration_sec = metadata
+    embeddings, starts, ends, sizes, valid_ratios = [], [], [], [], []
 
-    # ---- preprocess ----
-    # processor expects a list of (num_frames, H, W, C) or already-preprocessed arrays
-    inputs = processor(list(frames), return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)  # (1, num_frames, 3, H, W)
+    for requested_size in window_sizes:
+        intervals = make_sliding_windows(
+            duration_sec, requested_size, overlap=overlap
+        )
+        intervals = evenly_spaced_subset(intervals, max_windows_per_size)
+        for start_sec, end_sec in intervals:
+            embeddings.append(
+                extract_video_embedding(
+                    video_path,
+                    model=model,
+                    processor=processor,
+                    device=device,
+                    num_frames=num_frames,
+                    img_size=img_size,
+                    pool_mode=pool_mode,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    metadata=metadata,
+                    use_amp=use_amp,
+                )
+            )
+            starts.append(start_sec)
+            ends.append(end_sec)
+            sizes.append(requested_size)
+            valid_ratios.append(min(1.0, (end_sec - start_sec) / requested_size))
 
-    # ---- forward ----
-    outputs = model(pixel_values)
-    last_hidden = outputs.last_hidden_state  # (1, num_patches+1, hidden_dim)
-
-    # ---- pool ----
-    if pool_mode == "cls":
-        embedding = last_hidden[:, 0, :]  # CLS token
-    else:
-        embedding = last_hidden[:, 1:, :].mean(dim=1)  # mean over patches
-
-    return embedding.squeeze(0).cpu().numpy()
+    record = WindowEmbeddings(
+        embeddings=np.stack(embeddings),
+        start_sec=np.asarray(starts),
+        end_sec=np.asarray(ends),
+        window_sec=np.asarray(sizes),
+        valid_ratio=np.asarray(valid_ratios),
+    ).validate()
+    return record, metadata
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract VideoMAE video embeddings")
-    parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
-    parser.add_argument("--device", default=None, help="Override device (cuda/cpu)")
-    parser.add_argument("--pool", default="cls", choices=["cls", "mean"],
-                        help="Pooling mode: cls token or mean over patches")
-    parser.add_argument("--model-path", default=None,
-                        help="Pre-downloaded model directory (overrides config)")
+    parser = argparse.ArgumentParser(
+        description="Extract corrected global and windowed VideoMAE embeddings"
+    )
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu")
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument(
+        "--window-output-dir",
+        default=None,
+        help="Override output/emb_windows/video for checkpoint ablations",
+    )
+    parser.add_argument("--mode", choices=["global", "windows", "both"], default=None)
+    parser.add_argument("--pool", choices=["mean", "mean_std"], default=None)
+    parser.add_argument("--window-sizes", default=None, help="Seconds, e.g. 2,4,8")
+    parser.add_argument("--overlap", type=float, default=None)
+    parser.add_argument("--amp", action="store_true", help="Use CUDA float16 autocast")
+    parser.add_argument("--subject-ids", default=None, help="Comma-separated HD IDs")
+    parser.add_argument("--limit", type=int, default=None, help="Process only first N subjects")
+    parser.add_argument("--max-windows-per-size", type=int, default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    video_cfg = cfg["models"]["video"]
+    window_cfg = cfg.get("windowing", {}).get("video", {})
     device = args.device or cfg.get("device", "cuda")
+    mode = args.mode or window_cfg.get("mode", "both")
+    pool_mode = args.pool or window_cfg.get("pool", "mean")
+    overlap = args.overlap
+    if overlap is None:
+        overlap = float(window_cfg.get("overlap", 0.5))
+    sizes_value = args.window_sizes or ",".join(
+        str(value) for value in window_cfg.get("sizes_sec", [2, 4, 8])
+    )
+    window_sizes = parse_window_sizes(sizes_value)
+    max_windows_per_size = (
+        args.max_windows_per_size
+        if args.max_windows_per_size is not None
+        else int(window_cfg.get("max_windows_per_size", 64))
+    )
 
     video_dir = cfg["paths"]["video_dir"]
     output_dir = Path(cfg["paths"]["output_dir"])
-    emb_out = output_dir / "emb" / "video"
+    global_out = output_dir / "emb" / "video"
+    window_out = (
+        Path(args.window_output_dir)
+        if args.window_output_dir
+        else output_dir / "emb_windows" / "video"
+    )
+    num_frames = int(video_cfg["frame_count"])
+    img_size = int(video_cfg["img_size"])
 
-    # ---- resolve model path (local > ModelScope) ----
-    model_local = args.model_path or cfg["models"]["video"].get("local_path")
-    ms_name = cfg["models"]["video"]["ms_name"]
-    num_frames = cfg["models"]["video"]["frame_count"]
-    img_size = cfg["models"]["video"]["img_size"]
-
-    print(f"=== Video Embedding Extraction ===")
-    print(f"  Video dir : {video_dir}")
-    print(f"  Model     : {ms_name}  (via ModelScope)")
-    print(f"  Frames    : {num_frames} @ {img_size}×{img_size}")
-    print(f"  Pooling   : {args.pool}")
-    print(f"  Device    : {device}")
-    print(f"  Output    : {emb_out}")
+    print("=== Corrected VideoMAE Embedding Extraction ===")
+    print(f"  Video dir       : {video_dir}")
+    print(f"  Mode            : {mode}")
+    print(f"  Pooling         : {pool_mode} (all patch tokens; no CLS)")
+    print(f"  Window sizes    : {window_sizes} sec, overlap={overlap:.2f}")
+    print(f"  Max windows     : {max_windows_per_size} per size and subject")
+    print(f"  Frames per clip : {num_frames}")
+    print(f"  Device / AMP    : {device} / {args.amp}")
 
     if not Path(video_dir).is_dir():
         print(f"[ERROR] Video directory not found: {video_dir}")
-        print("[HINT] Are you running on the server with the data mounted?")
         sys.exit(1)
 
-    local_path = resolve_model_path(model_local, ms_name, cache_dir=cfg["models"].get("cache_dir"))
-    model, processor = load_videomae_local(local_path, device=device)
-
-    # ---- iterate over HDXXX/ subdirs ----
-    subdirs = sorted(
-        d for d in Path(video_dir).iterdir()
-        if d.is_dir() and extract_subject_id(d.name) is not None
+    model_local = args.model_path or video_cfg.get("local_path")
+    local_path = resolve_model_path(
+        model_local,
+        video_cfg["ms_name"],
+        cache_dir=cfg["models"].get("cache_dir"),
     )
+    model, processor = load_videomae_local(local_path, device=device)
+    print(f"  Architecture    : {getattr(model.config, 'architectures', None)}")
+    print(f"  Hidden size     : {getattr(model.config, 'hidden_size', 'unknown')}")
+
+    subdirs = sorted(
+        path
+        for path in Path(video_dir).iterdir()
+        if path.is_dir() and extract_subject_id(path.name) is not None
+    )
+    if args.subject_ids:
+        requested_ids = {
+            value.strip().upper()
+            for value in args.subject_ids.split(",")
+            if value.strip()
+        }
+        subdirs = [
+            path for path in subdirs if extract_subject_id(path.name) in requested_ids
+        ]
+    if args.limit is not None:
+        subdirs = subdirs[: args.limit]
     if not subdirs:
-        print(f"[ERROR] No HDXXX/ directories found in {video_dir}")
+        print(f"[ERROR] No HDXXX directories found in {video_dir}")
         sys.exit(1)
 
-    print(f"  Subjects  : {len(subdirs)} directories")
-
+    failures = 0
     for subdir in tqdm(subdirs, desc="Extracting video"):
         sid = extract_subject_id(subdir.name)
-        mp4_path = subdir / "4.mp4"
-        if not mp4_path.exists():
+        video_path = subdir / "4.mp4"
+        if not video_path.exists():
             print(f"  [Skip] {sid}: 4.mp4 not found")
+            failures += 1
             continue
-
         try:
-            emb = extract_video_embedding(
-                str(mp4_path), model, processor,
-                device=device, num_frames=num_frames, img_size=img_size,
-                pool_mode=args.pool,
-            )
-            save_embedding(str(emb_out), sid, emb)
-        except Exception as e:
-            print(f"  [Error] {sid}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
+            metadata = read_video_metadata(str(video_path))
+            if mode in {"global", "both"}:
+                global_embedding = extract_video_embedding(
+                    str(video_path),
+                    model=model,
+                    processor=processor,
+                    device=device,
+                    num_frames=num_frames,
+                    img_size=img_size,
+                    pool_mode=pool_mode,
+                    metadata=metadata,
+                    use_amp=args.amp,
+                )
+                save_embedding(str(global_out), sid, global_embedding)
 
-    print(f"Done. Embeddings saved to {emb_out}")
+            if mode in {"windows", "both"}:
+                record, metadata = extract_video_windows(
+                    str(video_path),
+                    model=model,
+                    processor=processor,
+                    window_sizes=window_sizes,
+                    overlap=overlap,
+                    device=device,
+                    num_frames=num_frames,
+                    img_size=img_size,
+                    pool_mode=pool_mode,
+                    use_amp=args.amp,
+                    max_windows_per_size=max_windows_per_size,
+                )
+                _, fps, duration_sec = metadata
+                destination = save_window_embeddings(
+                    str(window_out),
+                    sid,
+                    record,
+                    metadata={
+                        "source": str(video_path),
+                        "fps": fps,
+                        "duration_sec": duration_sec,
+                        "pool": pool_mode,
+                        "num_frames": num_frames,
+                        "max_windows_per_size": max_windows_per_size,
+                    },
+                )
+                print(f"  Saved windows: {destination} ({len(record.embeddings)})")
+        except Exception as exc:
+            failures += 1
+            print(f"  [Error] {sid}: {exc}")
+            import traceback
+
+            traceback.print_exc()
+
+    print(f"Done. Subjects={len(subdirs)}, failures={failures}")
+    if failures:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -165,10 +165,6 @@ def prepare_data(
         print("[ERROR] Too few subjects for train/test split.")
         sys.exit(1)
 
-    # Scale
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X)
-
     le = LabelEncoder()
     y = torch.tensor(le.fit_transform(y_str), dtype=torch.long)
 
@@ -238,6 +234,16 @@ def main():
     else:
         X_val, y_val = X_test, y_test
 
+    # Fit preprocessing on training subjects only.  The previous version fit
+    # StandardScaler before the split, leaking test-set means and variances.
+    scaler = StandardScaler()
+    X_train_np = scaler.fit_transform(X_train.numpy())
+    X_val_np = scaler.transform(X_val.numpy())
+    X_test_np = scaler.transform(X_test.numpy())
+    X_train = torch.tensor(X_train_np, dtype=torch.float32)
+    X_val = torch.tensor(X_val_np, dtype=torch.float32)
+    X_test = torch.tensor(X_test_np, dtype=torch.float32)
+
     print(f"  Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
 
     # ---- data loaders ----
@@ -262,7 +268,7 @@ def main():
 
     # ---- train ----
     print(f"\n  Training {epochs} epochs (lr={lr}, batch={batch_size})...\n")
-    best_val_acc = 0.0
+    best_val_acc = float("-inf")
     best_state = None
     stale = 0
 
@@ -303,8 +309,16 @@ def main():
 
     # ---- save model ----
     model_path = model_dir / "fusion_mlp.pt"
-    torch.save({"state_dict": best_state, "config": cfg["fusion"], "le_classes": le.classes_.tolist()},
-               str(model_path))
+    torch.save(
+        {
+            "state_dict": best_state,
+            "config": cfg["fusion"],
+            "le_classes": le.classes_.tolist(),
+            "scaler_mean": scaler.mean_,
+            "scaler_scale": scaler.scale_,
+        },
+        str(model_path),
+    )
     print(f"\n  Model saved to: {model_path}")
 
 

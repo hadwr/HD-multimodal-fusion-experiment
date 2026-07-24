@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
-import yaml
 
 
 # ============================================================
@@ -23,6 +22,8 @@ import yaml
 
 def load_config(config_path: str = "config.yaml") -> dict:
     """Load YAML config and resolve relative paths against the config file's directory."""
+    import yaml
+
     config_path = Path(config_path)
     if not config_path.exists():
         # Try relative to the project root (parent of this file)

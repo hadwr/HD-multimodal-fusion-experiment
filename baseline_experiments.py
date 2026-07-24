@@ -47,6 +47,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.cross_decomposition import CCA
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
@@ -170,13 +171,24 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray, y_prob: Optional[np.ndarray
     return metrics
 
 
-def cv_evaluate(clf, X: np.ndarray, y: np.ndarray, cv_folds: int = 5) -> dict:
-    """Stratified K-fold CV evaluation using AUC-ROC and PR-AUC."""
+def cv_evaluate(
+    clf,
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_folds: int = 5,
+    pca_variance: Optional[float] = None,
+) -> dict:
+    """Leakage-safe CV with scaling/PCA fitted independently in every fold."""
     cv = StratifiedKFold(n_splits=min(cv_folds, min(np.bincount(y))), shuffle=True,
                          random_state=42)
-    y_pred = cross_val_predict(clf, X, y, cv=cv, method="predict")
+    steps = [("scale", StandardScaler())]
+    if pca_variance is not None:
+        steps.append(("pca", PCA(n_components=pca_variance, random_state=42)))
+    steps.append(("classifier", clf))
+    estimator = Pipeline(steps)
+    y_pred = cross_val_predict(estimator, X, y, cv=cv, method="predict")
     try:
-        y_prob = cross_val_predict(clf, X, y, cv=cv, method="predict_proba")
+        y_prob = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
     except Exception:
         y_prob = None
     return evaluate(y, y_pred, y_prob)
@@ -250,8 +262,13 @@ def run_single_modality(
             "features": f"pca{pca_dim}",
             "dim": pca_dim,
         })
-        cv_pca = cv_evaluate(clf_pca, np.vstack([X_train_pca, X_test_pca]),
-                             np.hstack([y_train, y_test]), cv_folds)
+        cv_pca = cv_evaluate(
+            make_classifier(clf_name, rs),
+            X,
+            y,
+            cv_folds,
+            pca_variance=pca_var,
+        )
         metrics_pca["cv_auc_roc"] = cv_pca["auc_roc"]
         metrics_pca["cv_pr_auc"] = cv_pca["pr_auc"]
         results.append(metrics_pca)
@@ -338,17 +355,7 @@ def run_late_fusion(
         print(f"  mean_prob_svm      | AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}")
         results.append(m)
 
-    # --- Majority voting ---
-    votes = np.column_stack([a_pred, v_pred])
-    vote_pred = np.array([np.bincount(v).argmax() for v in votes])
-    # voting doesn't produce meaningful probabilities, just report accuracy + AUC from vote ratio
-    vote_prob = np.column_stack([
-        np.array([np.bincount(v, minlength=2) / 2.0 for v in votes])
-    ])
-    m = evaluate(y_test, vote_pred, vote_prob)
-    m.update({"modality": "audio+video (late)", "classifier": "voting_svm", "features": "late", "dim": 0})
-    print(f"  voting_svm         | AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}")
-    results.append(m)
+    print("  hard voting omitted: two modalities have no valid majority tie-break")
 
     return results
 
@@ -391,7 +398,13 @@ def run_cca_fusion(
     X_v_test_pca = pca_v.transform(X_v_test)
 
     # CCA — find correlated subspace
-    n_cca = min(X_a_train_pca.shape[1], X_v_train_pca.shape[1], len(y_train) - 1)
+    max_cca = int(cfg["baseline"].get("cca_components", 5))
+    n_cca = min(
+        max_cca,
+        X_a_train_pca.shape[1],
+        X_v_train_pca.shape[1],
+        len(y_train) - 1,
+    )
     cca = CCA(n_components=n_cca, scale=False, max_iter=2000)
     cca.fit(X_a_train_pca, X_v_train_pca)
 
@@ -399,26 +412,26 @@ def run_cca_fusion(
     a_train_cca, v_train_cca = cca.transform(X_a_train_pca, X_v_train_pca)
     a_test_cca, v_test_cca = cca.transform(X_a_test_pca, X_v_test_pca)
 
-    # Canonical correlations (on training data)
-    can_corrs = np.array([np.corrcoef(a_train_cca[:, i], v_train_cca[:, i])[0, 1]
-                          for i in range(n_cca)])
-    top5_corr = ", ".join(f"{c:.3f}" for c in sorted(can_corrs, reverse=True)[:5])
+    # Report held-out correlations. Training correlations are optimistically
+    # biased, particularly when feature dimension approaches sample count.
+    can_corrs = np.array([
+        np.corrcoef(a_test_cca[:, i], v_test_cca[:, i])[0, 1]
+        if np.std(a_test_cca[:, i]) > 0 and np.std(v_test_cca[:, i]) > 0
+        else np.nan
+        for i in range(n_cca)
+    ])
+    top5_corr = ", ".join(
+        f"{c:.3f}" for c in sorted(can_corrs[np.isfinite(can_corrs)], reverse=True)[:5]
+    )
     print(f"  PCA dims: audio={X_a_train_pca.shape[1]}, video={X_v_train_pca.shape[1]}")
     print(f"  CCA components: {n_cca}")
-    print(f"  Top-5 canonical correlations: {top5_corr}")
-    print(f"  Mean canonical corr: {can_corrs.mean():.4f}")
+    print(f"  Held-out canonical correlations: {top5_corr}")
+    print(f"  Held-out mean canonical corr: {np.nanmean(can_corrs):.4f}")
 
     # Fuse: concatenate CCA projections
     X_train_fused = np.concatenate([a_train_cca, v_train_cca], axis=1)
     X_test_fused = np.concatenate([a_test_cca, v_test_cca], axis=1)
     fused_dim = X_train_fused.shape[1]
-
-    X_full = np.concatenate([
-        np.concatenate([cca.transform(X_a_train_pca, X_v_train_pca)[0],
-                        cca.transform(X_a_train_pca, X_v_train_pca)[1]], axis=1),
-        np.concatenate([a_test_cca, v_test_cca], axis=1),
-    ], axis=0)
-    y_full = np.concatenate([y_train, y_test])
 
     for clf_name, clf in make_classifiers(cfg):
         clf.fit(X_train_fused, y_train)
@@ -433,11 +446,13 @@ def run_cca_fusion(
             "classifier": clf_name,
             "features": f"cca{fused_dim}",
             "dim": fused_dim,
-            "canonical_corr_mean": can_corrs.mean(),
+            "canonical_corr_mean": np.nanmean(can_corrs),
         })
-        cv_m = cv_evaluate(clf, X_full, y_full, cv_folds)
-        metrics["cv_auc_roc"] = cv_m["auc_roc"]
-        metrics["cv_pr_auc"] = cv_m["pr_auc"]
+        # A correct CCA CV requires fitting scaling, PCA and CCA inside every
+        # fold. The legacy helper cannot express paired-modality transforms, so
+        # leave these fields empty rather than report leaked estimates.
+        metrics["cv_auc_roc"] = float("nan")
+        metrics["cv_pr_auc"] = float("nan")
         results.append(metrics)
         print(f"  {clf_name:>16s}  CCA   | AUC={metrics['auc_roc']:.4f}  PR={metrics['pr_auc']:.4f}  CV_AUC={metrics['cv_auc_roc']:.4f}")
 
@@ -447,12 +462,12 @@ def run_cca_fusion(
         "classifier": "_cca_stats",
         "features": f"cca{n_cca}",
         "dim": n_cca,
-        "auc_roc": can_corrs.mean(),  # hack: store mean corr in auc_roc slot for bar chart
+        "auc_roc": np.nanmean(can_corrs),
         "pr_auc": 0,
         "accuracy": 0,
         "cv_auc_roc": 0,
         "cv_pr_auc": 0,
-        "canonical_corr_mean": can_corrs.mean(),
+        "canonical_corr_mean": np.nanmean(can_corrs),
     })
 
     return results
